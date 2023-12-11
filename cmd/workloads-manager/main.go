@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp" // this is required to auth against GCP
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	rbacv1alpha1 "github.com/gocardless/theatre/v4/apis/rbac/v1alpha1"
@@ -81,12 +81,16 @@ func main() {
 	idBuilder := workloadsv1alpha1.NewConsoleIdBuilder(*contextName)
 	lifecycleRecorder := workloadsv1alpha1.NewLifecycleEventRecorder(*contextName, logger, publisher, idBuilder)
 
+	server := webhook.NewServer(webhook.Options{
+		Port: 443,
+	})
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		MetricsBindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort),
-		Port:               443,
-		LeaderElection:     commonOpts.ManagerLeaderElection,
-		LeaderElectionID:   "workloads.crds.gocardless.com",
-		Scheme:             scheme,
+		// MetricsBindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort),
+		LeaderElection:   commonOpts.ManagerLeaderElection,
+		LeaderElectionID: "workloads.crds.gocardless.com",
+		Scheme:           scheme,
+		WebhookServer:    server,
 	})
 	if err != nil {
 		app.Fatalf("failed to create manager: %v", err)

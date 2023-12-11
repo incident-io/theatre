@@ -14,6 +14,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -27,7 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	rbacv1alpha1 "github.com/gocardless/theatre/v4/apis/rbac/v1alpha1"
 	workloadsv1alpha1 "github.com/gocardless/theatre/v4/apis/workloads/v1alpha1"
@@ -109,25 +109,19 @@ func (r *ConsoleReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workloadsv1alpha1.Console{}).
 		Watches(
-			&source.Kind{Type: &workloadsv1alpha1.Console{}},
+			&workloadsv1alpha1.Console{},
 			&handler.EnqueueRequestForObject{},
 		).
 		Watches(
-			&source.Kind{Type: &workloadsv1alpha1.ConsoleAuthorisation{}},
-			&handler.EnqueueRequestForOwner{
-				IsController: true,
-				OwnerType:    &workloadsv1alpha1.Console{},
-			},
+			&workloadsv1alpha1.ConsoleAuthorisation{},
+			handler.EnqueueRequestForOwner(r.Scheme, &meta.DefaultRESTMapper{}, &workloadsv1alpha1.Console{}, handler.OnlyControllerOwner()),
 			// Don't unnecessarily reconcile when the controller initially creates the
 			// authorisation object.
 			builder.WithPredicates(IgnoreCreatePredicate{}),
 		).
 		Watches(
-			&source.Kind{Type: &batchv1.Job{}},
-			&handler.EnqueueRequestForOwner{
-				IsController: true,
-				OwnerType:    &workloadsv1alpha1.Console{},
-			},
+			&batchv1.Job{},
+			handler.EnqueueRequestForOwner(r.Scheme, &meta.DefaultRESTMapper{}, &workloadsv1alpha1.Console{}, handler.OnlyControllerOwner()),
 		).
 		Complete(
 			recutil.ResolveAndReconcile(

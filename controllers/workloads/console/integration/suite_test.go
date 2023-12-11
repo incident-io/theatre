@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	rbacv1alpha1 "github.com/gocardless/theatre/v4/apis/rbac/v1alpha1"
@@ -65,12 +66,15 @@ var _ = BeforeSuite(func() {
 	idBuilder := workloadsv1alpha1.NewConsoleIdBuilder("test")
 	lifecycleRecorder := workloadsv1alpha1.NewLifecycleEventRecorder("test", ctrl.Log, events.NewNopPublisher(), idBuilder)
 
-	mgr, err = ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: scheme,
-
-		Port:    testEnv.WebhookInstallOptions.LocalServingPort,
+	server := webhook.NewServer(webhook.Options{
 		Host:    testEnv.WebhookInstallOptions.LocalServingHost,
 		CertDir: testEnv.WebhookInstallOptions.LocalServingCertDir,
+		Port:    testEnv.WebhookInstallOptions.LocalServingPort,
+	})
+
+	mgr, err = ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:        scheme,
+		WebhookServer: server,
 	})
 	Expect(err).ToNot(HaveOccurred())
 
