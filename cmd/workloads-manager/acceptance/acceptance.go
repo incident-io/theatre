@@ -240,7 +240,7 @@ func (r *Runner) Run(logger kitlog.Logger, config *rest.Config) {
 				Expect(err).NotTo(HaveOccurred(), "could not create runner")
 			})
 
-			FSpecify("Happy path", func() {
+			Specify("Happy path", func() {
 				By("Create a console template")
 				var TTLBeforeRunning int32 = 60
 				var TTLAfterFinished int32 = 10
