@@ -151,6 +151,7 @@ func main() {
 			lifecycleRecorder,
 			logger.WithName("webhooks").WithName("console-attach-observer"),
 			10*time.Second,
+			mgr.GetScheme(),
 		),
 	})
 
