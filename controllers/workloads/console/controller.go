@@ -14,7 +14,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -114,14 +113,14 @@ func (r *ConsoleReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 		).
 		Watches(
 			&workloadsv1alpha1.ConsoleAuthorisation{},
-			handler.EnqueueRequestForOwner(r.Scheme, &meta.DefaultRESTMapper{}, &workloadsv1alpha1.Console{}, handler.OnlyControllerOwner()),
+			handler.EnqueueRequestForOwner(r.Scheme, mgr.GetRESTMapper(), &workloadsv1alpha1.Console{}, handler.OnlyControllerOwner()),
 			// Don't unnecessarily reconcile when the controller initially creates the
 			// authorisation object.
 			builder.WithPredicates(IgnoreCreatePredicate{}),
 		).
 		Watches(
 			&batchv1.Job{},
-			handler.EnqueueRequestForOwner(r.Scheme, &meta.DefaultRESTMapper{}, &workloadsv1alpha1.Console{}, handler.OnlyControllerOwner()),
+			handler.EnqueueRequestForOwner(r.Scheme, mgr.GetRESTMapper(), &workloadsv1alpha1.Console{}, handler.OnlyControllerOwner()),
 		).
 		Complete(
 			recutil.ResolveAndReconcile(

@@ -8,7 +8,6 @@ import (
 	"github.com/go-logr/logr"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -113,7 +112,7 @@ func (r *DirectoryRoleBindingReconciler) SetupWithManager(mgr manager.Manager) e
 		For(&rbacv1alpha1.DirectoryRoleBinding{}).
 		Watches(
 			&rbacv1.RoleBinding{},
-			handler.EnqueueRequestForOwner(r.Scheme, &meta.DefaultRESTMapper{}, &rbacv1alpha1.DirectoryRoleBinding{}, handler.OnlyControllerOwner()),
+			handler.EnqueueRequestForOwner(r.Scheme, mgr.GetRESTMapper(), &rbacv1alpha1.DirectoryRoleBinding{}, handler.OnlyControllerOwner()),
 		).
 		Complete(
 			recutil.ResolveAndReconcile(
