@@ -90,6 +90,7 @@ func main() {
 			mgr.GetClient(),
 			logger.WithName("webhooks").WithName("secrets-injector"),
 			injectorOpts,
+			mgr.GetScheme(),
 		),
 	})
 

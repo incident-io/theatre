@@ -112,11 +112,16 @@ func main() {
 		app.Fatalf("failed to create controller: %v", err)
 	}
 
+	// NOTE: We may want to simplify the implementation of webhooks, like this:
+	// https://book.kubebuilder.io/cronjob-tutorial/webhook-implementation
+	// Currently there's a lot of boilerplate/wiring up, which isn't really necessary.
+
 	// console authenticator webhook
 	mgr.GetWebhookServer().Register("/mutate-consoles", &admission.Webhook{
 		Handler: workloadsv1alpha1.NewConsoleAuthenticatorWebhook(
 			lifecycleRecorder,
 			logger.WithName("webhooks").WithName("console-authenticator"),
+			mgr.GetScheme(),
 		),
 	})
 
@@ -126,6 +131,7 @@ func main() {
 			mgr.GetClient(),
 			lifecycleRecorder,
 			logger.WithName("webhooks").WithName("console-authorisation"),
+			mgr.GetScheme(),
 		),
 	})
 
@@ -133,6 +139,7 @@ func main() {
 	mgr.GetWebhookServer().Register("/validate-consoletemplates", &admission.Webhook{
 		Handler: workloadsv1alpha1.NewConsoleTemplateValidationWebhook(
 			logger.WithName("webhooks").WithName("console-template"),
+			mgr.GetScheme(),
 		),
 	})
 
