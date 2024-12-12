@@ -303,8 +303,8 @@ func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Cons
 				// which case we should exit early, unless it is a watch expired error, in which case we try again.
 				if status, ok := event.Object.(*metav1.Status); ok {
 					if status.Reason == metav1.StatusReasonExpired {
-						// Setting the ResourceVersion to an empty string will cause the watch to start from the beginning.
-						// Using the resource value set in the initial watch will not work, and cause another expired error.
+						// Recreating a watch from the previous ResourceVersion is not guaranteed to work, and can just return another expired watch.
+						// Setting the ResourceVersion to an empty string will cause the watch to start from the start of that pod's history, which should avoid the issue.
 						listOptions.ResourceVersion = ""
 						break WATCHEXPIRED
 					}
@@ -314,7 +314,7 @@ func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Cons
 				// We should be safe now, as a watcher should return either Status or the type we
 				// asked it for. But we've been wrong before, and it wasn't easy to figure out what
 				// happened when we didn't print the type of the event.
-				pod, ok = event.Object.(*corev1.Pod)
+				pod, ok := event.Object.(*corev1.Pod)
 				if !ok {
 					return fmt.Errorf("received an event that didn't reference a pod, which is unexpected: %v",
 						reflect.TypeOf(event.Object))
@@ -330,10 +330,6 @@ func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Cons
 				return fmt.Errorf("pod's last phase was: %v: %w", pod.Status.Phase, ctx.Err())
 			}
 		}
-
-		// Sleep for a bit before trying again
-		time.Sleep(time.Duration(500 * time.Millisecond))
-		w.Stop()
 	}
 	// This error will only be raised after we have used all attempts to get a successful watch for the pod
 	return fmt.Errorf("received watch expired %d times", maxAttempts)
