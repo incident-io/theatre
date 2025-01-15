@@ -11,6 +11,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	rbacv1alpha1 "github.com/gocardless/theatre/v4/apis/rbac/v1alpha1"
+	workloadsv1alpha1 "github.com/gocardless/theatre/v4/apis/workloads/v1alpha1"
 	"gomodules.xyz/jsonpatch/v3"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -31,9 +33,6 @@ import (
 	"k8s.io/kubectl/pkg/scheme"
 	"k8s.io/kubectl/pkg/util/term"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	rbacv1alpha1 "github.com/gocardless/theatre/v4/apis/rbac/v1alpha1"
-	workloadsv1alpha1 "github.com/gocardless/theatre/v4/apis/workloads/v1alpha1"
 )
 
 // Alias genericclioptions.IOStreams to avoid additional imports
@@ -493,7 +492,7 @@ func (a *interactiveAttacher) Attach(ctx context.Context, pod *corev1.Pod, conta
 
 	streamOptions, safe := CreateInteractiveStreamOptions(streams)
 
-	return safe(func() error { return remoteExecutor.Stream(streamOptions) })
+	return safe(func() error { return remoteExecutor.StreamWithContext(ctx, streamOptions) })
 }
 
 // CreateInteractiveStreamOptions constructs streaming configuration that
@@ -567,7 +566,7 @@ func (a *noninteractiveAttacher) Attach(ctx context.Context, pod *corev1.Pod, co
 		Tty:    false,
 	}
 
-	return remoteExecutor.Stream(streamOptions)
+	return remoteExecutor.StreamWithContext(ctx, streamOptions)
 }
 
 type AuthoriseOptions struct {
