@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"reflect"
 	"strings"
 	"text/tabwriter"
@@ -22,14 +23,17 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/kubectl/pkg/cmd/get"
+	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/scheme"
 	"k8s.io/kubectl/pkg/util/term"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -485,9 +489,9 @@ func (a *interactiveAttacher) Attach(ctx context.Context, pod *corev1.Pod, conta
 		scheme.ParameterCodec,
 	)
 
-	remoteExecutor, err := remotecommand.NewSPDYExecutor(a.restconfig, "POST", req.URL())
+	remoteExecutor, err := createExecutor(req.URL(), a.restconfig)
 	if err != nil {
-		return fmt.Errorf("failed to create SPDY executor: %w", err)
+		return fmt.Errorf("failed to create executor: %w", err)
 	}
 
 	streamOptions, safe := CreateInteractiveStreamOptions(streams)
@@ -554,9 +558,9 @@ func (a *noninteractiveAttacher) Attach(ctx context.Context, pod *corev1.Pod, co
 		scheme.ParameterCodec,
 	)
 
-	remoteExecutor, err := remotecommand.NewSPDYExecutor(a.restconfig, "POST", req.URL())
+	remoteExecutor, err := createExecutor(req.URL(), a.restconfig)
 	if err != nil {
-		return fmt.Errorf("failed to create SPDY executor: %w", err)
+		return fmt.Errorf("failed to create executor: %w", err)
 	}
 
 	streamOptions := remotecommand.StreamOptions{
@@ -567,6 +571,31 @@ func (a *noninteractiveAttacher) Attach(ctx context.Context, pod *corev1.Pod, co
 	}
 
 	return remoteExecutor.StreamWithContext(ctx, streamOptions)
+}
+
+// createExecutor returns the Executor or an error if one occurred.
+// NOTE: Borrowed from `kubectl attach`.
+func createExecutor(url *url.URL, config *restclient.Config) (remotecommand.Executor, error) {
+	exec, err := remotecommand.NewSPDYExecutor(config, "POST", url)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try to use the new websocket protocol, and the fallback executor is default, unless feature flag is explicitly disabled.
+	if !cmdutil.RemoteCommandWebsockets.IsDisabled() {
+		// WebSocketExecutor must be "GET" method as described in RFC 6455 Sec. 4.1 (page 17).
+		websocketExec, err := remotecommand.NewWebSocketExecutor(config, "GET", url.String())
+		if err != nil {
+			return nil, err
+		}
+		exec, err = remotecommand.NewFallbackExecutor(websocketExec, exec, func(err error) bool {
+			return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return exec, nil
 }
 
 type AuthoriseOptions struct {
