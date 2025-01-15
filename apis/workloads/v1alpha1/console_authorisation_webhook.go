@@ -8,14 +8,13 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/gocardless/theatre/v4/pkg/logging"
+	rbacutils "github.com/gocardless/theatre/v4/pkg/rbac"
 	"github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
-
-	"github.com/gocardless/theatre/v4/pkg/logging"
-	rbacutils "github.com/gocardless/theatre/v4/pkg/rbac"
 )
 
 // +kubebuilder:object:generate=false
@@ -23,7 +22,7 @@ type ConsoleAuthorisationWebhook struct {
 	client            client.Client
 	lifecycleRecorder LifecycleEventRecorder
 	logger            logr.Logger
-	decoder           *admission.Decoder
+	decoder           admission.Decoder
 }
 
 func NewConsoleAuthorisationWebhook(c client.Client, lifecycleRecorder LifecycleEventRecorder, logger logr.Logger, scheme *runtime.Scheme) *ConsoleAuthorisationWebhook {

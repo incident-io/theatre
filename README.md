@@ -73,10 +73,8 @@ Theatre assumes developers have several tools installed to provide development
 and testing capabilities. The following will configure a macOS environment with
 all the necessary dependencies:
 
-
 ```shell
 make install-tools-homebrew
-make install-tools-kubebuilder
 make install-tools
 sudo mkdir /usr/local/kubebuilder
 curl -fsL "https://github.com/kubernetes-sigs/kubebuilder/releases/download/v2.3.1/kubebuilder_2.3.1_$(go env GOOS)_$(go env GOARCH).tar.gz" | \
@@ -140,12 +138,12 @@ framework.
 In order to setup your local testing environment for unit and integration tests do the following:
 
 ```shell
-$ make install-tools
-$ # install setup-envtest which configures etcd and kube-apiserver binaries for envtest
-$ # https://book.kubebuilder.io/reference/envtest.html#configuring-envtest-for-integration-tests
-$ # https://github.com/kubernetes-sigs/controller-runtime/tree/master/tools/setup-envtest#envtest-binaries-manager
-$ # Configures envtest to use k8s 1.24.x binaries, in your shell (if required)
-$ eval $(setup-envtest use -i -p env 1.24.x)
+make install-tools
+# install setup-envtest which configures etcd and kube-apiserver binaries for envtest
+# https://book.kubebuilder.io/reference/envtest.html#configuring-envtest-for-integration-tests
+# https://github.com/kubernetes-sigs/controller-runtime/tree/master/tools/setup-envtest#envtest-binaries-manager
+# Configures envtest to use k8s 1.30.x binaries, in your shell (if required)
+eval $(setup-envtest use -i -p env 1.30.x)
 ```
 
 - **Unit**: Standard unit tests, used to exhaustively specify the functionality of

@@ -16,7 +16,7 @@ import (
 type ConsoleAuthenticatorWebhook struct {
 	lifecycleRecorder LifecycleEventRecorder
 	logger            logr.Logger
-	decoder           *admission.Decoder
+	decoder           admission.Decoder
 }
 
 func NewConsoleAuthenticatorWebhook(lifecycleRecorder LifecycleEventRecorder, logger logr.Logger, scheme *runtime.Scheme) *ConsoleAuthenticatorWebhook {

@@ -1,6 +1,7 @@
 .env
 tmp/
 .git/
+.github/
 .kube/
 bin/
 config/

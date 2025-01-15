@@ -7,13 +7,12 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/gocardless/theatre/v4/pkg/logging"
 	corev1 "k8s.io/api/core/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
-
-	"github.com/gocardless/theatre/v4/pkg/logging"
 )
 
 // +kubebuilder:object:generate=false
@@ -22,7 +21,7 @@ type ConsoleAttachObserverWebhook struct {
 	recorder          record.EventRecorder
 	lifecycleRecorder LifecycleEventRecorder
 	logger            logr.Logger
-	decoder           *admission.Decoder
+	decoder           admission.Decoder
 	requestTimeout    time.Duration
 }
 
