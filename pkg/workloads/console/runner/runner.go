@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"text/tabwriter"
@@ -239,7 +240,7 @@ func (c *Runner) Create(ctx context.Context, opts CreateOptions) (*workloadsv1al
 	return csl, nil
 }
 
-func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Console) error {
+func (c *Runner) waitForPodCompletion(ctx context.Context, csl *workloadsv1alpha1.Console) error {
 	isRunning := func(pod *corev1.Pod) bool {
 		return pod != nil && pod.Status.Phase == corev1.PodRunning
 	}
@@ -274,6 +275,7 @@ func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Cons
 			//
 			// TODO: It may be better to recheck the console and look in its status?
 			if apierrors.IsNotFound(err) {
+				fmt.Fprintf(os.Stderr, "WARN: pod no longer exists, assuming success")
 				return nil
 			}
 
@@ -285,7 +287,7 @@ func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Cons
 		}
 
 		if !isRunning(pod) {
-			return fmt.Errorf("pod in unsuccessful state %s: %s", pod.Status.Phase, pod.Status.Message)
+			return podFailedError(pod)
 		}
 
 		status := w.ResultChan()
@@ -299,7 +301,7 @@ func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Cons
 				// If our channel is closed, exit with error, as we'll otherwise assume
 				// we were successful when we never reached this state.
 				if !ok {
-					return errors.New("watch channel closed")
+					return errors.New("pod watch channel closed")
 				}
 
 				// We can receive *metav1.Status events in the situation where there's an error, in
@@ -327,7 +329,7 @@ func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Cons
 					return nil
 				}
 				if !isRunning(pod) {
-					return fmt.Errorf("pod in unsuccessful state %s: %s", pod.Status.Phase, pod.Status.Message)
+					return podFailedError(pod)
 				}
 			case <-ctx.Done():
 				return fmt.Errorf("pod's last phase was: %v: %w", pod.Status.Phase, ctx.Err())
@@ -405,7 +407,8 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 	attacher := newAttacher(c.clientset, opts.KubeConfig, !csl.Spec.Noninteractive)
 
 	err = attacher.Attach(ctx, pod, containerName, opts.IO)
-	// At this point, we're blocked until the attach finishes.
+	// At this point, we're blocked until the attach finishes, i.e. a problem has
+	// occurred or the container has terminated.
 	if err != nil {
 		// If this is true, it is likely that the pod has already terminated for whatever
 		// reason - very often because a command has run so quickly that by the time waitForConsole
@@ -413,25 +416,47 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 		// (only if the pod exited unsuccessfully).
 		if strings.Contains(err.Error(), fmt.Sprintf("container %s not found in pod %s", containerName, pod.Name)) {
 			// Dump the pod logs and propagate the pod's exit code, in case it just completed quickly
-			return c.extractLogs(ctx, csl, pod, containerName, opts.IO)
+			return c.copyLogsAndWaitForCompletion(ctx, csl, pod, containerName, opts.IO)
 		}
 
-		// Dump the pod logs but don't propagate the pod's exit code, as we have a genuine issue attaching that we want pass back
-		c.extractLogs(ctx, csl, pod, containerName, opts.IO)
+		// Dump the pod logs but don't propagate the pod's exit code, as we have a genuine
+		// issue attaching that we want pass back
+		err = c.copyLogs(ctx, pod, containerName, opts.IO)
+		if err != nil {
+			// We don't yet have a logger abstraction, so just write to stderr.
+			fmt.Fprintf(opts.IO.ErrOut, "WARN: failed to copy logs from pod: %v\n", err)
+		}
 
-		return fmt.Errorf("failed to attach to console: %w", err)
+		return fmt.Errorf("attacher failed to initialise, or stream interrupted: %w", err)
 	}
 
-	// We have either terminated or detached from a running console so nothing to do
+	// If we've reached this point, then our console pod has _likely_ finished succesfully.
+
+	// We need to maintain this, in order to support the detach control sequence
+	// (C-p C-q) functionality, without returning an error.
+	// NOTE: Detaching via this sequence has been broken for some time in upstream
+	// k8s, so this currently buys us nothing.
 	if !csl.Spec.Noninteractive {
+		fmt.Println("Nothing to do for interactive")
+		// We have either terminated or detached from a running console so we
+		// *don't* want to wait for success.
 		return nil
 	}
 
 	// We are attached to a non-interactive console (streaming logs) so keep streaming until the pod completes or errors
-	return c.waitForSuccess(ctx, csl)
+	// Check the final state of the pod, so that we can return an appropriate exit code.
+	return c.waitForPodCompletion(ctx, csl)
 }
 
-func (c *Runner) extractLogs(ctx context.Context, csl *workloadsv1alpha1.Console, pod *corev1.Pod, containerName string, streams IOStreams) error {
+func podFailedError(pod *corev1.Pod) error {
+	reason := string(pod.Status.Phase)
+	if pod.Status.Message != "" {
+		reason = reason + ": " + pod.Status.Message
+	}
+	return fmt.Errorf("pod in unsuccessful state: %s", reason)
+}
+
+func (c *Runner) copyLogs(ctx context.Context, pod *corev1.Pod, containerName string, streams IOStreams) error {
 	pods := c.clientset.CoreV1().Pods(pod.Namespace)
 
 	logs, err := pods.GetLogs(pod.Name, &corev1.PodLogOptions{Container: containerName}).Stream(ctx)
@@ -445,9 +470,17 @@ func (c *Runner) extractLogs(ctx context.Context, csl *workloadsv1alpha1.Console
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func (c *Runner) copyLogsAndWaitForCompletion(ctx context.Context, csl *workloadsv1alpha1.Console, pod *corev1.Pod, containerName string, streams IOStreams) error {
+	err := c.copyLogs(ctx, pod, containerName, streams)
+	if err != nil {
+		return fmt.Errorf("failed to copy logs from pod: %w", err)
+	}
 
 	// Propagate the exit status of the pod as though we had actually attached.
-	return c.waitForSuccess(ctx, csl)
+	return c.waitForPodCompletion(ctx, csl)
 }
 
 func newAttacher(clientset kubernetes.Interface, restconfig *rest.Config, isInteractive bool) *attacher {
@@ -466,6 +499,11 @@ type attacher struct {
 // If we're in interactive mode, it'll do some extra setup around STDIN and TTYs.
 // The function will block until the container terminates, or we encounter an error in our
 // stream.
+// NOTE: This will attach from the current point in the pod's output stream. In Kubernetes, there's
+// still no way to use the Attach API in a way that retrieves previous terminal output, as per issue
+// #27264.
+// TODO: We could consider augmenting this with a call to retrieve logs, immediately before
+// attaching.
 func (a *attacher) Attach(ctx context.Context, pod *corev1.Pod, containerName string, streams IOStreams) error {
 	req := a.clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
@@ -900,7 +938,7 @@ func (c *Runner) waitForConsole(ctx context.Context, createdCsl workloadsv1alpha
 			// If our channel is closed, exit with error, as we'll otherwise assume
 			// we were successful when we never reached this state.
 			if !ok {
-				return nil, errors.New("watch channel closed")
+				return nil, errors.New("console watch channel closed")
 			}
 
 			// We can ignore Bookmark events, because we aren't making requests using bookmarks.
@@ -914,7 +952,7 @@ func (c *Runner) waitForConsole(ctx context.Context, createdCsl workloadsv1alpha
 
 			obj, ok := event.Object.(*unstructured.Unstructured)
 			if !ok {
-				return nil, fmt.Errorf("failed  to cast watch event")
+				return nil, fmt.Errorf("failed to cast watch event")
 			}
 
 			err = runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), csl)
