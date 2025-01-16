@@ -402,14 +402,10 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 		return err
 	}
 
-	var attacher Attacher
-	if !csl.Spec.Noninteractive {
-		attacher = newInteractiveAttacher(c.clientset, opts.KubeConfig)
-	} else {
-		attacher = newNoninteractiveAttacher(c.clientset, opts.KubeConfig)
-	}
+	attacher := newAttacher(c.clientset, opts.KubeConfig, !csl.Spec.Noninteractive)
 
 	err = attacher.Attach(ctx, pod, containerName, opts.IO)
+	// At this point, we're blocked until the attach finishes.
 	if err != nil {
 		// If this is true, it is likely that the pod has already terminated for whatever
 		// reason - very often because a command has run so quickly that by the time waitForConsole
@@ -454,24 +450,23 @@ func (c *Runner) extractLogs(ctx context.Context, csl *workloadsv1alpha1.Console
 	return c.waitForSuccess(ctx, csl)
 }
 
-func newInteractiveAttacher(clientset kubernetes.Interface, restconfig *rest.Config) Attacher {
-	return &interactiveAttacher{clientset, restconfig}
+func newAttacher(clientset kubernetes.Interface, restconfig *rest.Config, isInteractive bool) *attacher {
+	return &attacher{clientset, restconfig, isInteractive}
 }
 
-type Attacher interface {
-	Attach(ctx context.Context, pod *corev1.Pod, containerName string, streams IOStreams) error
+// attacher knows how to attach to stdio of an existing container, relaying io
+// to the parent process file descriptors, and optionally opening a TTY session.
+type attacher struct {
+	clientset     kubernetes.Interface
+	restconfig    *rest.Config
+	isInteractive bool
 }
 
-// interactiveAttacher knows how to attach to stdio of an existing container, relaying io
-// to the parent process file descriptors.
-type interactiveAttacher struct {
-	clientset  kubernetes.Interface
-	restconfig *rest.Config
-}
-
-// Attach will interactively attach to a container's output, creating a new TTY
-// and hooking this into the current processes file descriptors.
-func (a *interactiveAttacher) Attach(ctx context.Context, pod *corev1.Pod, containerName string, streams IOStreams) error {
+// Attach will attach to a container's output, and hooking into the current processes file descriptors.
+// If we're in interactive mode, it'll do some extra setup around STDIN and TTYs.
+// The function will block until the container terminates, or we encounter an error in our
+// stream.
+func (a *attacher) Attach(ctx context.Context, pod *corev1.Pod, containerName string, streams IOStreams) error {
 	req := a.clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Namespace(pod.GetNamespace()).
@@ -480,10 +475,10 @@ func (a *interactiveAttacher) Attach(ctx context.Context, pod *corev1.Pod, conta
 
 	req.VersionedParams(
 		&corev1.PodAttachOptions{
-			Stdin:     true,
+			Stdin:     a.isInteractive,
 			Stdout:    true,
 			Stderr:    true,
-			TTY:       true,
+			TTY:       a.isInteractive,
 			Container: containerName,
 		},
 		scheme.ParameterCodec,
@@ -494,7 +489,18 @@ func (a *interactiveAttacher) Attach(ctx context.Context, pod *corev1.Pod, conta
 		return fmt.Errorf("failed to create executor: %w", err)
 	}
 
-	streamOptions, safe := CreateInteractiveStreamOptions(streams)
+	// Set up our standard, non-interactive streaming.
+	streamOptions := remotecommand.StreamOptions{
+		Stderr: streams.ErrOut,
+		Stdout: streams.Out,
+		Stdin:  nil,
+		Tty:    false,
+	}
+	safe := func(f term.SafeFunc) error { return f() }
+
+	if a.isInteractive {
+		streamOptions, safe = CreateInteractiveStreamOptions(streams)
+	}
 
 	return safe(func() error { return remoteExecutor.StreamWithContext(ctx, streamOptions) })
 }
@@ -504,16 +510,17 @@ func (a *interactiveAttacher) Attach(ctx context.Context, pod *corev1.Pod, conta
 // function which should be used to wrap any interactive process that will make
 // use of the tty.
 func CreateInteractiveStreamOptions(streams IOStreams) (remotecommand.StreamOptions, func(term.SafeFunc) error) {
-	// TODO: We may want to setup a parent interrupt handler, so that if/when the
-	// pod is terminated while a user is attached, they aren't left with their
-	// terminal in a strange state, if they're running something curses-based in
-	// the console.
-	// Parent: ...
 	tty := term.TTY{
 		In:     streams.In,
 		Out:    streams.ErrOut,
 		Raw:    true,
 		TryDev: false,
+
+		// TODO: We may want to setup a parent interrupt handler, so that if/when the
+		// pod is terminated while a user is attached, they aren't left with their
+		// terminal in a strange state, if they're running something curses-based in
+		// the console.
+		// Parent: interrupt.Handler{...}
 	}
 
 	// This call spawns a goroutine to monitor/update the terminal size
@@ -526,51 +533,6 @@ func CreateInteractiveStreamOptions(streams IOStreams) (remotecommand.StreamOpti
 		Tty:               true,
 		TerminalSizeQueue: sizeQueue,
 	}, tty.Safe
-}
-
-// noninteractiveAttacher knows how to attach to stdout/err of an existing container, without
-// opening a TTY session or passing STDIN from the parent process.
-type noninteractiveAttacher struct {
-	clientset  kubernetes.Interface
-	restconfig *rest.Config
-}
-
-func newNoninteractiveAttacher(clientset kubernetes.Interface, restconfig *rest.Config) Attacher {
-	return &noninteractiveAttacher{clientset, restconfig}
-}
-
-// Attach will attach to a container's output.
-func (a *noninteractiveAttacher) Attach(ctx context.Context, pod *corev1.Pod, containerName string, streams IOStreams) error {
-	req := a.clientset.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Namespace(pod.GetNamespace()).
-		Name(pod.GetName()).
-		SubResource("attach")
-
-	req.VersionedParams(
-		&corev1.PodAttachOptions{
-			Stdin:     false,
-			Stdout:    true,
-			Stderr:    true,
-			TTY:       false,
-			Container: containerName,
-		},
-		scheme.ParameterCodec,
-	)
-
-	remoteExecutor, err := createExecutor(req.URL(), a.restconfig)
-	if err != nil {
-		return fmt.Errorf("failed to create executor: %w", err)
-	}
-
-	streamOptions := remotecommand.StreamOptions{
-		Stderr: streams.ErrOut,
-		Stdout: streams.Out,
-		Stdin:  nil,
-		Tty:    false,
-	}
-
-	return remoteExecutor.StreamWithContext(ctx, streamOptions)
 }
 
 // createExecutor returns the Executor or an error if one occurred.
