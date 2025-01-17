@@ -406,46 +406,66 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 
 	attacher := newAttacher(c.clientset, opts.KubeConfig, !csl.Spec.Noninteractive)
 
-	err = attacher.Attach(ctx, pod, containerName, opts.IO)
-	// At this point, we're blocked until the attach finishes, i.e. a problem has
-	// occurred or the container has terminated.
-	if err != nil {
-		// If this is true, it is likely that the pod has already terminated for whatever
-		// reason - very often because a command has run so quickly that by the time waitForConsole
-		// is done the script has run to completion. We don't necessarily want to error out
-		// (only if the pod exited unsuccessfully).
-		if strings.Contains(err.Error(), fmt.Sprintf("container %s not found in pod %s", containerName, pod.Name)) {
-			// Dump the pod logs and propagate the pod's exit code, in case it just completed quickly
-			return c.copyLogsAndWaitForCompletion(ctx, csl, pod, containerName, opts.IO)
+	// The attacher can hang under some circumstances. Therefore we need to run it separately, and
+	// not wait for its completion before exiting the CLI.
+	attachErrCh := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				attachErrCh <- fmt.Errorf("panic in attach goroutine: %v", r)
+			}
+		}()
+
+		attachErr := attacher.Attach(ctx, pod, containerName, opts.IO)
+		attachErrCh <- attachErr
+	}()
+
+	// *Block* until our pod has completed.
+	// NOTE: This effectively precludes the detach escape sequence (C-p C-q) from working, but
+	// that's already non-functional in recent k8s versions anyway.
+	// At this point, we deliberately don't immediately check the error, because our handling of it
+	// depends on other conditions.
+	podStatusErr := c.waitForPodCompletion(ctx, csl)
+
+	// Our pod has now completed, and we have its exit status, so we wait for either of:
+	// 1. The attach goroutine to complete.
+	// 2. The attach goroutine to have *not* completed, after 5 seconds.
+	select {
+	case err := <-attachErrCh:
+		// Our attach completed, either normally or with an error.
+		if err != nil {
+			if !strings.Contains(err.Error(), fmt.Sprintf("container %s not found in pod %s", containerName, pod.Name)) {
+				fmt.Fprintf(opts.IO.ErrOut, "WARN: attach resulted in an error: %v\n", err)
+				// It's quite a normal case that true, the pod has already terminated, quicker than
+				// we could attach to it.
+				// However, in this block, that *isn't* the case. We may have already copied some of
+				// the console's output to the terminal, but we can't be sure of how much of it came
+				// through, as we have no indicator of when the attach failed in respect to the
+				// console pod's lifetime.
+				// By re-dumping the logs, after this block, we can ensure that the user sees the
+				// full output, but it could be duplicates of previously-dumped lines!
+				fmt.Fprintf(opts.IO.ErrOut, "WARN: re-copying pod logs, duplicate output is possible\n")
+			}
+
+			if copyErr := c.copyLogs(ctx, pod, containerName, opts.IO); copyErr != nil {
+				fmt.Fprintf(opts.IO.ErrOut, "WARN: failed to copy logs from pod: %v\n", copyErr)
+			}
 		}
 
-		// Dump the pod logs but don't propagate the pod's exit code, as we have a genuine
-		// issue attaching that we want pass back
-		err = c.copyLogs(ctx, pod, containerName, opts.IO)
-		if err != nil {
-			// We don't yet have a logger abstraction, so just write to stderr.
+		return podStatusErr
+
+	case <-time.After(5 * time.Second):
+		// Our attach didn't complete (maybe it's hanging), so we should continue so as not
+		// to block program termination, especially in the case of a non-interactive
+		// console.
+		fmt.Fprintf(opts.IO.ErrOut, "WARN: attach didn't complete. re-copying pod logs, duplicate output is possible\n")
+
+		if err := c.copyLogs(ctx, pod, containerName, opts.IO); err != nil {
 			fmt.Fprintf(opts.IO.ErrOut, "WARN: failed to copy logs from pod: %v\n", err)
 		}
 
-		return fmt.Errorf("attacher failed to initialise, or stream interrupted: %w", err)
+		return podStatusErr
 	}
-
-	// If we've reached this point, then our console pod has _likely_ finished succesfully.
-
-	// We need to maintain this, in order to support the detach control sequence
-	// (C-p C-q) functionality, without returning an error.
-	// NOTE: Detaching via this sequence has been broken for some time in upstream
-	// k8s, so this currently buys us nothing.
-	if !csl.Spec.Noninteractive {
-		fmt.Println("Nothing to do for interactive")
-		// We have either terminated or detached from a running console so we
-		// *don't* want to wait for success.
-		return nil
-	}
-
-	// We are attached to a non-interactive console (streaming logs) so keep streaming until the pod completes or errors
-	// Check the final state of the pod, so that we can return an appropriate exit code.
-	return c.waitForPodCompletion(ctx, csl)
 }
 
 func podFailedError(pod *corev1.Pod) error {
@@ -471,16 +491,6 @@ func (c *Runner) copyLogs(ctx context.Context, pod *corev1.Pod, containerName st
 		return err
 	}
 	return nil
-}
-
-func (c *Runner) copyLogsAndWaitForCompletion(ctx context.Context, csl *workloadsv1alpha1.Console, pod *corev1.Pod, containerName string, streams IOStreams) error {
-	err := c.copyLogs(ctx, pod, containerName, streams)
-	if err != nil {
-		return fmt.Errorf("failed to copy logs from pod: %w", err)
-	}
-
-	// Propagate the exit status of the pod as though we had actually attached.
-	return c.waitForPodCompletion(ctx, csl)
 }
 
 func newAttacher(clientset kubernetes.Interface, restconfig *rest.Config, isInteractive bool) *attacher {
