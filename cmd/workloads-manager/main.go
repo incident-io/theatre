@@ -84,10 +84,11 @@ func main() {
 	lifecycleRecorder := workloadsv1alpha1.NewLifecycleEventRecorder(*contextName, logger, publisher, idBuilder)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Metrics:          metricsserver.Options{BindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort)},
-		LeaderElection:   commonOpts.ManagerLeaderElection,
-		LeaderElectionID: "workloads.crds.gocardless.com",
-		Scheme:           scheme,
+		Metrics:                       metricsserver.Options{BindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort)},
+		LeaderElection:                commonOpts.ManagerLeaderElection,
+		LeaderElectionID:              "workloads.crds.gocardless.com",
+		LeaderElectionReleaseOnCancel: true,
+		Scheme:                        scheme,
 		WebhookServer: webhook.NewServer(webhook.Options{
 			Port: 443,
 		}),

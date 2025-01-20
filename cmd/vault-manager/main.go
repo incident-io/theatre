@@ -59,9 +59,10 @@ func main() {
 	defer cancel()
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Metrics:          metricsserver.Options{BindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort)},
-		LeaderElection:   commonOpts.ManagerLeaderElection,
-		LeaderElectionID: "vault.crds.gocardless.com",
+		Metrics:                       metricsserver.Options{BindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort)},
+		LeaderElection:                commonOpts.ManagerLeaderElection,
+		LeaderElectionID:              "vault.crds.gocardless.com",
+		LeaderElectionReleaseOnCancel: true,
 		WebhookServer: webhook.NewServer(webhook.Options{
 			Port: 443,
 		}),
