@@ -87,10 +87,11 @@ func main() {
 	webhookServer := webhook.NewServer(webhook.Options{Port: 443})
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		LeaderElection:   commonOpts.ManagerLeaderElection,
-		LeaderElectionID: "workloads.crds.gocardless.com",
-		Scheme:           scheme,
-		WebhookServer:    webhookServer,
+		LeaderElection:                commonOpts.ManagerLeaderElection,
+		LeaderElectionID:              "workloads.crds.gocardless.com",
+		LeaderElectionReleaseOnCancel: true,
+		Scheme:                        scheme,
+		WebhookServer:                 webhookServer,
 		Metrics: metricsserver.Options{
 			BindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort),
 		},

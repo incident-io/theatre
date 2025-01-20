@@ -82,9 +82,10 @@ func main() {
 		Metrics: metricsserver.Options{
 			BindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort),
 		},
-		WebhookServer:    webhookServer,
-		LeaderElection:   commonOpts.ManagerLeaderElection,
-		LeaderElectionID: "rbac.crds.gocardless.com",
+		WebhookServer:                 webhookServer,
+		LeaderElection:                commonOpts.ManagerLeaderElection,
+		LeaderElectionID:              "rbac.crds.gocardless.com",
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		app.Fatalf("failed to create manager: %v", err)
