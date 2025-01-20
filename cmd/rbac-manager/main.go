@@ -73,10 +73,11 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:           scheme,
-		Metrics:          metricsserver.Options{BindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort)},
-		LeaderElection:   commonOpts.ManagerLeaderElection,
-		LeaderElectionID: "rbac.crds.gocardless.com",
+		Scheme:                        scheme,
+		Metrics:                       metricsserver.Options{BindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort)},
+		LeaderElection:                commonOpts.ManagerLeaderElection,
+		LeaderElectionID:              "rbac.crds.gocardless.com",
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		app.Fatalf("failed to create manager: %v", err)

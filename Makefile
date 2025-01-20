@@ -74,13 +74,6 @@ install-tools-homebrew:
 	brew install kubernetes-cli kustomize kind
 	echo "you also need docker and go in your developer environment"
 
-# Deprecated
-deploy:
-	kustomize build config/base | kubectl apply -f -
-
-deploy-production:
-	kustomize build config/overlays/production | kubectl apply -f -
-
 docker-build:
 	docker build -t $(IMAGE):latest .
 
@@ -92,4 +85,3 @@ docker-push:
 
 docker-tag:
 	docker tag $(IMAGE):$$(git rev-parse HEAD) $(IMAGE):latest
-
