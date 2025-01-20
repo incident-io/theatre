@@ -8,14 +8,13 @@ import (
 
 	"github.com/go-logr/logr"
 	runtime "k8s.io/apimachinery/pkg/runtime"
-
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // +kubebuilder:object:generate=false
 type ConsoleTemplateValidationWebhook struct {
 	logger  logr.Logger
-	decoder *admission.Decoder
+	decoder admission.Decoder
 }
 
 func NewConsoleTemplateValidationWebhook(logger logr.Logger, scheme *runtime.Scheme) *ConsoleTemplateValidationWebhook {

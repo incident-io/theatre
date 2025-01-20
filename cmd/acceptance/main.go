@@ -168,7 +168,7 @@ func main() {
 		}
 
 		logger.Log("msg", "installing theatre into cluster")
-		applyCmd = exec.CommandContext(ctx, "kubectl", "--context", fmt.Sprintf("kind-%s", *clusterName), "apply", "-f", "-")
+		applyCmd = exec.CommandContext(ctx, "kubectl", "--context", fmt.Sprintf("kind-%s", *clusterName), "apply", "--server-side", "-f", "-")
 		applyCmd.Stdin = bytes.NewReader(manifests)
 
 		if err := pipeOutput(applyCmd).Run(); err != nil {

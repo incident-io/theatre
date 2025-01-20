@@ -42,7 +42,7 @@ vet:
 	go vet -tests -unreachable ./...
 
 test: install-tools
-	KUBEBUILDER_ASSETS="$(shell setup-envtest use -p path 1.24.x!)" ginkgo -race -randomizeSuites -randomizeAllSpecs -r ./...
+	KUBEBUILDER_ASSETS="$(shell setup-envtest use -p path 1.30.x!)" ginkgo -race -randomizeSuites -randomizeAllSpecs -r ./...
 
 # Requires the following binaries: kubectl, kustomize, kind, docker
 acceptance-e2e: install-tools acceptance-prepare acceptance-run acceptance-destroy
@@ -67,8 +67,8 @@ manifests: generate
 # See https://github.com/kubernetes-sigs/controller-runtime/tree/main/tools/setup-envtest
 install-tools:
 	go install github.com/onsi/ginkgo/ginkgo@v1.16.5
-	go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.10.0
-	go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.17
+	go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.1
+	go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.20
 
 install-tools-homebrew:
 	brew install kubernetes-cli kustomize kind

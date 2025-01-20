@@ -28,7 +28,7 @@ var FQDNArray = []string{SecretsInjectorFQDN, EnvconsulInjectorFQDN}
 type SecretsInjector struct {
 	client  client.Client
 	logger  logr.Logger
-	decoder *admission.Decoder
+	decoder admission.Decoder
 	opts    SecretsInjectorOptions
 }
 
@@ -41,7 +41,7 @@ func NewSecretsInjector(c client.Client, logger logr.Logger, opts SecretsInjecto
 	}
 }
 
-func (e *SecretsInjector) InjectDecoder(d *admission.Decoder) error {
+func (e *SecretsInjector) InjectDecoder(d admission.Decoder) error {
 	e.decoder = d
 	return nil
 }
