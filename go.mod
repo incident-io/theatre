@@ -20,7 +20,7 @@ require (
 	github.com/prometheus/client_golang v1.19.1
 	github.com/sykesm/zap-logfmt v0.0.4
 	go.uber.org/zap v1.27.0
-	golang.org/x/oauth2 v0.23.0
+	golang.org/x/oauth2 v0.27.0
 	golang.org/x/sys v0.26.0
 	gomodules.xyz/jsonpatch/v3 v3.0.1
 	google.golang.org/api v0.155.0
@@ -61,7 +61,6 @@ require (
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
-	github.com/go-stack/stack v1.8.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
