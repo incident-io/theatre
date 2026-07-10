@@ -1,8 +1,6 @@
 module github.com/incident-io/theatre/v5
 
-go 1.23.0
-
-toolchain go1.23.4
+go 1.25.0
 
 require (
 	cloud.google.com/go/pubsub v1.34.0
@@ -21,7 +19,7 @@ require (
 	github.com/sykesm/zap-logfmt v0.0.4
 	go.uber.org/zap v1.27.0
 	golang.org/x/oauth2 v0.23.0
-	golang.org/x/sys v0.26.0
+	golang.org/x/sys v0.45.0
 	gomodules.xyz/jsonpatch/v3 v3.0.1
 	google.golang.org/api v0.155.0
 	gopkg.in/h2non/gock.v1 v1.0.15
@@ -61,7 +59,6 @@ require (
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
-	github.com/go-stack/stack v1.8.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
@@ -117,11 +114,11 @@ require (
 	go.opentelemetry.io/otel/metric v1.28.0 // indirect
 	go.opentelemetry.io/otel/trace v1.28.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/crypto v0.28.0 // indirect
-	golang.org/x/net v0.30.0 // indirect
-	golang.org/x/sync v0.8.0 // indirect
-	golang.org/x/term v0.25.0 // indirect
-	golang.org/x/text v0.19.0 // indirect
+	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/net v0.54.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/term v0.43.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.7.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	gomodules.xyz/orderedmap v0.1.0 // indirect
