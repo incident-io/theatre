@@ -21,6 +21,9 @@ type ConsoleSpec struct {
 	// +kubebuilder:validation:Maximum=604800
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
 
+	// The ConsoleTemplate this Console is created from. It's immutable, because
+	// the template's creatorRules are only checked when a Console is created.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="consoleTemplateRef is immutable"
 	ConsoleTemplateRef corev1.LocalObjectReference `json:"consoleTemplateRef"`
 
 	// Specifies the TTL before running for this Console. The Console will be

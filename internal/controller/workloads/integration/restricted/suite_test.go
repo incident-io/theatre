@@ -86,6 +86,7 @@ var _ = BeforeSuite(func() {
 
 	mgr.GetWebhookServer().Register("/mutate-consoles", &admission.Webhook{
 		Handler: internalworkloadsv1alpha1.NewConsoleAuthenticatorWebhook(
+			mgr.GetAPIReader(),
 			lifecycleRecorder,
 			ctrl.Log.WithName("webhooks").WithName("console-authenticator"),
 			mgr.GetScheme(),
