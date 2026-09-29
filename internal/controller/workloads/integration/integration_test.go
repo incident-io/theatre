@@ -883,5 +883,123 @@ var _ = Describe("Console", func() {
 				Expect(createErr).To(MatchError(ContainSubstring("a double wildcard is only valid at the end of the pattern")))
 			})
 		})
+
+		Context("when a creator rule has an unsupported kind", func() {
+			BeforeEach(func() {
+				consoleTemplate.Spec.CreatorRules = []rbacv1.Subject{
+					{Kind: "GoogleGroup", Name: "deployers@example.com"},
+				}
+			})
+
+			It("rejects the template", func() {
+				Expect(createErr).To(MatchError(ContainSubstring(".spec.creatorRules[0]: kind must be one of User, Group or ServiceAccount")))
+			})
+		})
+	})
+
+	Describe("Restricting who can create consoles with creatorRules", func() {
+		var (
+			creator   client.Client
+			createErr error
+		)
+
+		clientFor := func(name string, groups ...string) client.Client {
+			// system:masters stands in for any caller with RBAC to create
+			// consoles, including a PAM-elevated admin.
+			user, err := testEnv.AddUser(
+				envtest.User{Name: name, Groups: append([]string{"system:masters"}, groups...)},
+				&rest.Config{},
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			c, err := client.New(user.Config(), client.Options{Scheme: mgr.GetScheme()})
+			Expect(err).NotTo(HaveOccurred())
+
+			return c
+		}
+
+		BeforeEach(func() {
+			consoleTemplate.Spec.CreatorRules = []rbacv1.Subject{
+				{Kind: rbacv1.UserKind, Name: "buildkite@example.com"},
+				{Kind: rbacv1.GroupKind, Name: "deployers@example.com"},
+			}
+		})
+
+		JustBeforeEach(func() {
+			mustCreateNamespace()
+			Expect(mgr.GetClient().Create(context.TODO(), consoleTemplate)).To(Succeed())
+
+			createErr = creator.Create(context.TODO(), csl)
+		})
+
+		Context("when the caller is a listed user", func() {
+			BeforeEach(func() {
+				creator = clientFor("buildkite@example.com")
+			})
+
+			It("creates the console", func() {
+				Expect(createErr).NotTo(HaveOccurred())
+				Expect(csl.Spec.User).To(Equal("buildkite@example.com"))
+			})
+
+			It("doesn't let the console be moved to another template afterwards", func() {
+				Expect(createErr).NotTo(HaveOccurred())
+
+				Eventually(func() error {
+					latest := &workloadsv1alpha1.Console{}
+					if err := mgr.GetClient().Get(context.TODO(), client.ObjectKeyFromObject(csl), latest); err != nil {
+						return err
+					}
+					latest.Spec.ConsoleTemplateRef.Name = "another-template"
+					return mgr.GetClient().Update(context.TODO(), latest)
+				}).Should(MatchError(ContainSubstring("consoleTemplateRef is immutable")))
+			})
+		})
+
+		Context("when the caller is in a listed group", func() {
+			BeforeEach(func() {
+				creator = clientFor("deployer@example.com", "deployers@example.com")
+			})
+
+			It("creates the console", func() {
+				Expect(createErr).NotTo(HaveOccurred())
+			})
+		})
+
+		Context("when the caller isn't listed", func() {
+			BeforeEach(func() {
+				creator = clientFor("engineer@example.com", "engineers@example.com")
+			})
+
+			It("rejects the console, naming the template", func() {
+				Expect(createErr).To(MatchError(ContainSubstring(
+					`user "engineer@example.com" is not allowed to create consoles from template "console-template-0"`,
+				)))
+			})
+		})
+
+		Context("when the template has no creator rules", func() {
+			BeforeEach(func() {
+				consoleTemplate.Spec.CreatorRules = nil
+				creator = clientFor("engineer@example.com", "engineers@example.com")
+			})
+
+			It("creates the console, as before", func() {
+				Expect(createErr).NotTo(HaveOccurred())
+				Expect(csl.Spec.User).To(Equal("engineer@example.com"))
+			})
+		})
+
+		Context("when the template doesn't exist", func() {
+			BeforeEach(func() {
+				consoleTemplate.Spec.CreatorRules = nil
+				csl.Spec.ConsoleTemplateRef.Name = "missing-template"
+				creator = clientFor("engineer@example.com")
+			})
+
+			It("rejects the console", func() {
+				Expect(createErr).To(MatchError(ContainSubstring(`failed to get console template "missing-template"`)))
+			})
+		})
 	})
 })
