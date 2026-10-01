@@ -11,16 +11,17 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp" // this is required to auth against GCP
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	rbacv1alpha1 "github.com/gocardless/theatre/v4/apis/rbac/v1alpha1"
-	workloadsv1alpha1 "github.com/gocardless/theatre/v4/apis/workloads/v1alpha1"
-	"github.com/gocardless/theatre/v4/cmd"
-	consolecontroller "github.com/gocardless/theatre/v4/controllers/workloads/console"
-	"github.com/gocardless/theatre/v4/pkg/signals"
-	"github.com/gocardless/theatre/v4/pkg/workloads/console/events"
+	rbacv1alpha1 "github.com/gocardless/theatre/v5/api/rbac/v1alpha1"
+	workloadsv1alpha1 "github.com/gocardless/theatre/v5/api/workloads/v1alpha1"
+	"github.com/gocardless/theatre/v5/cmd"
+	consolecontroller "github.com/gocardless/theatre/v5/internal/controller/workloads"
+	internalworkloadsv1alpha1 "github.com/gocardless/theatre/v5/internal/webhook/workloads/v1alpha1"
+	"github.com/gocardless/theatre/v5/pkg/signals"
+	"github.com/gocardless/theatre/v5/pkg/workloads/console/events"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 var (
@@ -83,15 +84,17 @@ func main() {
 	idBuilder := workloadsv1alpha1.NewConsoleIdBuilder(*contextName)
 	lifecycleRecorder := workloadsv1alpha1.NewLifecycleEventRecorder(*contextName, logger, publisher, idBuilder)
 
+	webhookServer := webhook.NewServer(webhook.Options{Port: 443})
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Metrics:                       metricsserver.Options{BindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort)},
 		LeaderElection:                commonOpts.ManagerLeaderElection,
 		LeaderElectionID:              "workloads.crds.gocardless.com",
 		LeaderElectionReleaseOnCancel: true,
 		Scheme:                        scheme,
-		WebhookServer: webhook.NewServer(webhook.Options{
-			Port: 443,
-		}),
+		WebhookServer:                 webhookServer,
+		Metrics: metricsserver.Options{
+			BindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort),
+		},
 	})
 	if err != nil {
 		app.Fatalf("failed to create manager: %v", err)
@@ -113,13 +116,9 @@ func main() {
 		app.Fatalf("failed to create controller: %v", err)
 	}
 
-	// NOTE: We may want to simplify the implementation of webhooks, like this:
-	// https://book.kubebuilder.io/cronjob-tutorial/webhook-implementation
-	// Currently there's a lot of boilerplate/wiring up, which isn't really necessary.
-
 	// console authenticator webhook
 	mgr.GetWebhookServer().Register("/mutate-consoles", &admission.Webhook{
-		Handler: workloadsv1alpha1.NewConsoleAuthenticatorWebhook(
+		Handler: internalworkloadsv1alpha1.NewConsoleAuthenticatorWebhook(
 			lifecycleRecorder,
 			logger.WithName("webhooks").WithName("console-authenticator"),
 			mgr.GetScheme(),
@@ -128,7 +127,7 @@ func main() {
 
 	// console authorisation webhook
 	mgr.GetWebhookServer().Register("/validate-consoleauthorisations", &admission.Webhook{
-		Handler: workloadsv1alpha1.NewConsoleAuthorisationWebhook(
+		Handler: internalworkloadsv1alpha1.NewConsoleAuthorisationWebhook(
 			mgr.GetClient(),
 			lifecycleRecorder,
 			logger.WithName("webhooks").WithName("console-authorisation"),
@@ -138,7 +137,7 @@ func main() {
 
 	// console template webhook
 	mgr.GetWebhookServer().Register("/validate-consoletemplates", &admission.Webhook{
-		Handler: workloadsv1alpha1.NewConsoleTemplateValidationWebhook(
+		Handler: internalworkloadsv1alpha1.NewConsoleTemplateValidationWebhook(
 			logger.WithName("webhooks").WithName("console-template"),
 			mgr.GetScheme(),
 		),
@@ -146,7 +145,7 @@ func main() {
 
 	// console attach webhook
 	mgr.GetWebhookServer().Register("/observe-console-attach", &admission.Webhook{
-		Handler: workloadsv1alpha1.NewConsoleAttachObserverWebhook(
+		Handler: internalworkloadsv1alpha1.NewConsoleAttachObserverWebhook(
 			mgr.GetClient(),
 			mgr.GetEventRecorderFor("console-attach-observer"),
 			lifecycleRecorder,

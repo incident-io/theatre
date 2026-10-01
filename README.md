@@ -73,8 +73,10 @@ Theatre assumes developers have several tools installed to provide development
 and testing capabilities. The following will configure a macOS environment with
 all the necessary dependencies:
 
+
 ```shell
 make install-tools-homebrew
+make install-tools-kubebuilder
 make install-tools
 sudo mkdir /usr/local/kubebuilder
 curl -fsL "https://github.com/kubernetes-sigs/kubebuilder/releases/download/v2.3.1/kubebuilder_2.3.1_$(go env GOOS)_$(go env GOARCH).tar.gz" | \
@@ -138,12 +140,12 @@ framework.
 In order to setup your local testing environment for unit and integration tests do the following:
 
 ```shell
-make install-tools
-# install setup-envtest which configures etcd and kube-apiserver binaries for envtest
-# https://book.kubebuilder.io/reference/envtest.html#configuring-envtest-for-integration-tests
-# https://github.com/kubernetes-sigs/controller-runtime/tree/master/tools/setup-envtest#envtest-binaries-manager
-# Configures envtest to use k8s 1.30.x binaries, in your shell (if required)
-eval $(setup-envtest use -i -p env 1.30.x)
+$ make install-tools
+$ # install setup-envtest which configures etcd and kube-apiserver binaries for envtest
+$ # https://book.kubebuilder.io/reference/envtest.html#configuring-envtest-for-integration-tests
+$ # https://github.com/kubernetes-sigs/controller-runtime/tree/master/tools/setup-envtest#envtest-binaries-manager
+$ # Configures envtest to use k8s 1.24.x binaries, in your shell (if required)
+$ eval $(setup-envtest use -i -p env 1.24.x)
 ```
 
 - **Unit**: Standard unit tests, used to exhaustively specify the functionality of
@@ -185,3 +187,41 @@ make test
   [Example acceptance test](cmd/workloads-manager/acceptance/acceptance.go).
 
 [ginkgo]: https://onsi.github.io/ginkgo
+
+
+## Upgrading theatre
+
+### Upgrading from v4 to v5
+
+Theatre v5 is using the Kubebuilder v3 with its new layout, which introduces the
+following changes:
+#### Go module is now upgraded from github.com/gocardless/theatre/v4 to github.com/gocardless/theatre/v5
+The go module is now upgraded from github.com/gocardless/theatre/v4 to github.com/gocardless/theatre/v5, including all code references.
+
+
+#### `apis` folder is now called `api`
+Meaning that if you are importing any packages from `github.com/gocardless/theatre/v4/apis`, they should now be imported from `github.com/gocardless/theatre/v5/api`.
+
+#### `internal` folder has been added
+The unexported internal folder has been added to the project layout, containing the controllers and webhooks. If you were previously importing the controllers or webhooks you won't be able to do so any more.
+
+#### `pkg` folder
+No changes here, any packages imported from the `github.com/gocardless/theatre/v4/pkg` should continue to work as expected in v5 by using `github.com/gocardless/theatre/v5/pkg`.
+
+#### CRDs have to be imported manually from `config/crd`
+The CRDs are no longer included in the `config/base` kustomization and have to be imported manually from `config/crd`.
+
+```yaml
+# Before
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - github.com/gocardless/theatre/config/base?ref=v4.x.x
+
+# After
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - github.com/gocardless/theatre/config/crd?ref=v5.x.x
+  - github.com/gocardless/theatre/config/base?ref=v5.x.x
+```

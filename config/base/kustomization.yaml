@@ -5,46 +5,37 @@ kind: Kustomization
 namespace: theatre-system
 namePrefix: theatre-
 
-labels:
-- includeSelectors: true
-  pairs:
-    app: theatre
+commonLabels:
+  app: theatre
 
 resources:
-  - crds/rbac.crd.gocardless.com_directoryrolebindings.yaml
-  - crds/workloads.crd.gocardless.com_consoles.yaml
-  - crds/workloads.crd.gocardless.com_consoleauthorisations.yaml
-  - crds/workloads.crd.gocardless.com_consoletemplates.yaml
   - managers/namespace.yaml
   - managers/rbac.yaml
   - managers/vault.yaml
   - managers/workloads.yaml
+  - managers/release.yaml
+  - managers/rollback.yaml
+  - managers/automated-rollback.yaml
   - webhooks/vault.yaml
   - webhooks/workloads.yaml
+  - webhooks/release-mutating.yaml
+  - webhooks/release-validating.yaml
+  - webhooks/rollback-mutating.yaml
+  - webhooks/rollback-validating.yaml
+  - webhooks/automated-rollback-policy-validating.yaml
   - rbac/leader-election.yaml
   - cert-manager/certificate.yaml
 
-replacements:
+vars:
   # We want our mutating webhook to ensure it only ever configures pods to use
   # the same image as it is running itself. If we ensure this, we don't need to
   # worry about maintaining compatibility between versions of the webhook and
   # theatre-secrets, as both will use the same version and be deployed
   # atomically.
-  - source:
-      fieldPath: spec.template.spec.containers.[name=manager].image
-      group: apps
-      version: v1
+  - name: THEATRE_IMAGE
+    objref:
+      apiVersion: apps/v1
       kind: StatefulSet
-      name: theatre-vault-manager
-      namespace: theatre-system
-    targets:
-      - select:
-          group: apps
-          kind: StatefulSet
-          name: vault-manager
-          version: v1
-        fieldPaths:
-          - spec.template.spec.containers.0.args.0
-        options:
-          delimiter: =
-          index: 1
+      name: vault-manager
+    fieldref:
+      fieldpath: spec.template.spec.containers[0].image

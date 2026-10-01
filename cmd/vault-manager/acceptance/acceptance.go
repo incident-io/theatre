@@ -12,14 +12,16 @@ import (
 
 	kitlog "github.com/go-kit/kit/log"
 	"github.com/hashicorp/vault/api"
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 const (
@@ -231,7 +233,7 @@ spec:
             expirationSeconds: 900
   containers:
     - name: app
-      image: theatre:latest
+      image: localhost/theatre:latest
       imagePullPolicy: Never
       env:
         - name: VAULT_RESOLVED_KEY
@@ -269,7 +271,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: app
-      image: theatre:latest
+      image: localhost/theatre:latest
       imagePullPolicy: Never
       env:
         - name: VAULT_RESOLVED_KEY
@@ -296,7 +298,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: app
-      image: theatre:latest
+      image: localhost/theatre:latest
       imagePullPolicy: Never
       securityContext:
         runAsNonRoot: true
@@ -324,7 +326,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: app
-      image: theatre:latest
+      image: localhost/theatre:latest
       imagePullPolicy: Never
       securityContext:
         runAsNonRoot: true
@@ -334,7 +336,7 @@ spec:
           value: vault-file:jimmy:/tmp/jimmy
         - name: VAULT_TMP_FILE_RESOLVED_KEY
           value: vault-file:file-with-binary-contents
-        - name: VAULT_NON_ASCII_FILE
+        - name: VAULT_NON_ASCII_FILE 
           value: vault-file:file-non-ascii
       command:
         - bash
@@ -381,7 +383,7 @@ func (r *Runner) Run(logger kitlog.Logger, config *rest.Config) {
 		}
 
 		By("waiting on pod to succeed")
-		Eventually(getPodPhase, 20*time.Second).Should(
+		Eventually(getPodPhase, 10*time.Second).Should(
 			Equal(corev1.PodSucceeded),
 		)
 

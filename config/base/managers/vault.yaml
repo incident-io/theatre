@@ -95,6 +95,7 @@ metadata:
   name: vault-manager
   labels:
     group: vault.crd.gocardless.com
+    controller: vault-manager
 spec:
   serviceName: vault-manager
   replicas: 1
@@ -102,10 +103,12 @@ spec:
   selector:
     matchLabels:
       group: vault.crd.gocardless.com
+      controller: vault-manager
   template:
     metadata:
       labels:
         group: vault.crd.gocardless.com
+        controller: vault-manager
     spec:
       serviceAccountName: vault-manager
       terminationGracePeriodSeconds: 10
@@ -113,7 +116,7 @@ spec:
         - command:
             - /usr/local/bin/vault-manager
           args:
-            - --theatre-image=THEATRE_IMAGE_PLACEHOLDER
+            - --theatre-image=$(THEATRE_IMAGE)
             - --metrics-address=0.0.0.0
           image: eu.gcr.io/gc-containers/gocardless/theatre:latest
           imagePullPolicy: Always
@@ -148,6 +151,7 @@ metadata:
 spec:
   selector:
     group: vault.crd.gocardless.com
+    controller: vault-manager
   ports:
     - port: 443
       targetPort: 443

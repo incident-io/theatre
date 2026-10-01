@@ -17,14 +17,12 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	rbacv1alpha1 "github.com/gocardless/theatre/v4/apis/rbac/v1alpha1"
-	workloadsv1alpha1 "github.com/gocardless/theatre/v4/apis/workloads/v1alpha1"
-	"github.com/gocardless/theatre/v4/pkg/workloads/console/runner"
+	rbacv1alpha1 "github.com/gocardless/theatre/v5/api/rbac/v1alpha1"
+	workloadsv1alpha1 "github.com/gocardless/theatre/v5/api/workloads/v1alpha1"
+	"github.com/gocardless/theatre/v5/pkg/workloads/console/runner"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -47,10 +45,6 @@ func init() {
 }
 
 func newClient(config *rest.Config) client.Client {
-	// Prevent the following warning from being printed to logs:
-	// [controller-runtime] log.SetLogger(...) was never called; logs will not be displayed.
-	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
-
 	kubeClient, err := client.New(config, client.Options{Scheme: scheme})
 	Expect(err).NotTo(HaveOccurred(), "could not connect to kubernetes cluster")
 

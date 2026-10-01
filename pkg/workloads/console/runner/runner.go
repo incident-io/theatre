@@ -7,20 +7,18 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"os"
 	"reflect"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	rbacv1alpha1 "github.com/gocardless/theatre/v4/apis/rbac/v1alpha1"
-	workloadsv1alpha1 "github.com/gocardless/theatre/v4/apis/workloads/v1alpha1"
 	"gomodules.xyz/jsonpatch/v3"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -31,13 +29,17 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/remotecommand"
+	watchtools "k8s.io/client-go/tools/watch"
 	"k8s.io/kubectl/pkg/cmd/get"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/scheme"
 	"k8s.io/kubectl/pkg/util/term"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	rbacv1alpha1 "github.com/gocardless/theatre/v5/api/rbac/v1alpha1"
+	workloadsv1alpha1 "github.com/gocardless/theatre/v5/api/workloads/v1alpha1"
 )
 
 // Alias genericclioptions.IOStreams to avoid additional imports
@@ -55,6 +57,7 @@ type Options struct {
 	Cmd     []string
 	Timeout int
 	Reason  string
+	Labels  labels.Set
 	// Whether or not to enable a TTY for the console. Typically this
 	// should be set to false but some execution environments, eg
 	// Tekton, do not like attaching to TTY-enabled pods.
@@ -161,6 +164,9 @@ type CreateOptions struct {
 	KubeConfig *rest.Config
 	IO         IOStreams
 
+	// Allow specifying additional labels to be attached to the pod
+	Labels map[string]string
+
 	// Lifecycle hook to notify when the state of the console changes
 	Hook LifecycleHook
 }
@@ -169,6 +175,9 @@ type CreateOptions struct {
 func (opts CreateOptions) WithDefaults() CreateOptions {
 	if opts.Hook == nil {
 		opts.Hook = DefaultLifecycleHook{}
+	}
+	if opts.Labels == nil {
+		opts.Labels = labels.Set{}
 	}
 
 	return opts
@@ -190,7 +199,14 @@ func (c *Runner) Create(ctx context.Context, opts CreateOptions) (*workloadsv1al
 		return nil, err
 	}
 
-	opt := Options{Cmd: opts.Command, Timeout: int(opts.Timeout.Seconds()), Reason: opts.Reason, Noninteractive: opts.Noninteractive}
+	opt := Options{
+		Cmd:            opts.Command,
+		Timeout:        int(opts.Timeout.Seconds()),
+		Reason:         opts.Reason,
+		Noninteractive: opts.Noninteractive,
+		Labels:         labels.Merge(labels.Set{}, opts.Labels),
+	}
+
 	csl, err := c.CreateResource(tpl.Namespace, *tpl, opt)
 	if err != nil {
 		return nil, err
@@ -240,104 +256,79 @@ func (c *Runner) Create(ctx context.Context, opts CreateOptions) (*workloadsv1al
 	return csl, nil
 }
 
-func (c *Runner) waitForPodCompletion(ctx context.Context, csl *workloadsv1alpha1.Console) error {
-	isRunning := func(pod *corev1.Pod) bool {
-		return pod != nil && pod.Status.Phase == corev1.PodRunning
+// getListWatch is a convenience helper for creating a ListWatch for
+// different object types.
+//
+// It is meant to be used in methods that wait for objects:
+// - waitForSuccess (Pod)
+// - waitForConsole (Console)
+// - waitForRoleBinding (RoleBinding)
+func getListWatch[T runtime.Object](ctx context.Context, client resourceInterface[T], fieldSelector string) *cache.ListWatch {
+	return &cache.ListWatch{
+		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+			opts.FieldSelector = fieldSelector
+			return client.List(ctx, opts)
+		},
+		WatchFunc: func(opts metav1.ListOptions) (watch.Interface, error) {
+			opts.FieldSelector = fieldSelector
+			return client.Watch(ctx, opts)
+		},
 	}
+}
 
-	succeeded := func(pod *corev1.Pod) bool {
-		return pod != nil && pod.Status.Phase == corev1.PodSucceeded
+// resourceInterface is a generic interface for use with getListWatch
+type resourceInterface[T runtime.Object] interface {
+	List(ctx context.Context, opts metav1.ListOptions) (T, error)
+	Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error)
+}
+
+// checkPodState returns (true, nil) when the pod has reached a terminal
+// success state, (false, nil) to continue watching, or (true, err) on failure.
+func checkPodState(pod *corev1.Pod) (bool, error) {
+	switch pod.Status.Phase {
+	case corev1.PodRunning:
+		return false, nil
+	case corev1.PodSucceeded:
+		return true, nil
+	default:
+		return true, fmt.Errorf("pod in unexpected state %s: %s", pod.Status.Phase, pod.Status.Message)
 	}
+}
 
+func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Console) error {
 	pod, _, err := c.GetAttachablePod(ctx, csl)
 	if err != nil {
-		return err
-	}
-
-	listOptions := metav1.SingleObject(pod.ObjectMeta)
-
-	// Handle an expired watch up to 3 times
-	// This loop only interates on an expired watch, all other code paths return from this function
-	maxAttempts := 3
-	for i := 0; i < maxAttempts; i++ {
-		w, err := c.clientset.CoreV1().Pods(pod.Namespace).Watch(ctx, listOptions)
-		if err != nil {
-			return fmt.Errorf("error watching pod: %w", err)
-		}
-
-		// We need to fetch the pod again now we have a watcher to avoid a race
-		// where the pod completed before we were listening for watch events
-		pod, _, err = c.GetAttachablePod(ctx, csl)
-		if err != nil {
-			// If we can't find the pod, then we should assume it finished successfully. Otherwise
-			// we might race against the operator to access a pod it wants to delete, and cause
-			// our runner to exit with error when all is fine.
-			//
-			// TODO: It may be better to recheck the console and look in its status?
-			if apierrors.IsNotFound(err) {
-				fmt.Fprintf(os.Stderr, "WARN: pod no longer exists, assuming success")
-				return nil
-			}
-
-			return fmt.Errorf("error retrieving pod: %w", err)
-		}
-
-		if succeeded(pod) {
+		if apierrors.IsNotFound(err) {
 			return nil
 		}
-
-		if !isRunning(pod) {
-			return podFailedError(pod)
-		}
-
-		status := w.ResultChan()
-		defer w.Stop()
-
-		// If we get a watch expired error, we jump to this label, which will jump to the sleep after the for loop
-	WATCHEXPIRED:
-		for {
-			select {
-			case event, ok := <-status:
-				// If our channel is closed, exit with error, as we'll otherwise assume
-				// we were successful when we never reached this state.
-				if !ok {
-					return errors.New("pod watch channel closed")
-				}
-
-				// We can receive *metav1.Status events in the situation where there's an error, in
-				// which case we should exit early, unless it is a watch expired error, in which case we try again.
-				if status, ok := event.Object.(*metav1.Status); ok {
-					if status.Reason == metav1.StatusReasonExpired {
-						// Recreating a watch from the previous ResourceVersion is not guaranteed to work, and can just return another expired watch.
-						// Setting the ResourceVersion to an empty string will cause the watch to start from the start of that pod's history, which should avoid the issue.
-						listOptions.ResourceVersion = ""
-						break WATCHEXPIRED
-					}
-					return fmt.Errorf("received failure from Kubernetes: %s: %s", status.Reason, status.Message)
-				}
-
-				// We should be safe now, as a watcher should return either Status or the type we
-				// asked it for. But we've been wrong before, and it wasn't easy to figure out what
-				// happened when we didn't print the type of the event.
-				pod, ok := event.Object.(*corev1.Pod)
-				if !ok {
-					return fmt.Errorf("received an event that didn't reference a pod, which is unexpected: %v",
-						reflect.TypeOf(event.Object))
-				}
-
-				if succeeded(pod) {
-					return nil
-				}
-				if !isRunning(pod) {
-					return podFailedError(pod)
-				}
-			case <-ctx.Done():
-				return fmt.Errorf("pod's last phase was: %v: %w", pod.Status.Phase, ctx.Err())
-			}
-		}
+		return fmt.Errorf("retrieving pod: %w", err)
 	}
-	// This error will only be raised after we have used all attempts to get a successful watch for the pod
-	return fmt.Errorf("received watch expired %d times", maxAttempts)
+
+	fieldSelector := fields.OneTermEqualSelector("metadata.name", pod.Name).String()
+	namespacedPodClient := c.clientset.CoreV1().Pods(pod.Namespace)
+	lw := getListWatch(ctx, namespacedPodClient, fieldSelector)
+
+	// Precondition checks the current state from the informer's cache
+	// before processing any watch events
+	precondition := func(store cache.Store) (bool, error) {
+		items := store.List()
+		if len(items) == 0 {
+			return true, nil // pod gone, treat as success
+		}
+		return checkPodState(items[0].(*corev1.Pod))
+	}
+
+	// Condition processes each watch event
+	condition := func(event watch.Event) (bool, error) {
+		pod, ok := event.Object.(*corev1.Pod)
+		if !ok {
+			return false, fmt.Errorf("unexpected event object: %v", reflect.TypeOf(event.Object))
+		}
+		return checkPodState(pod)
+	}
+
+	_, err = watchtools.UntilWithSync(ctx, lw, &corev1.Pod{}, precondition, condition)
+	return err
 }
 
 type GetOptions struct {
@@ -425,7 +416,7 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 	// that's already non-functional in recent k8s versions anyway.
 	// At this point, we deliberately don't immediately check the error, because our handling of it
 	// depends on other conditions.
-	podStatusErr := c.waitForPodCompletion(ctx, csl)
+	podStatusErr := c.waitForSuccess(ctx, csl)
 
 	// Our pod has now completed, and we have its exit status, so we wait for either of:
 	// 1. The attach goroutine to complete.
@@ -466,14 +457,6 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 
 		return podStatusErr
 	}
-}
-
-func podFailedError(pod *corev1.Pod) error {
-	reason := string(pod.Status.Phase)
-	if pod.Status.Message != "" {
-		reason = reason + ": " + pod.Status.Message
-	}
-	return fmt.Errorf("pod in unsuccessful state: %s", reason)
 }
 
 func (c *Runner) copyLogs(ctx context.Context, pod *corev1.Pod, containerName string, streams IOStreams) error {
@@ -585,7 +568,7 @@ func CreateInteractiveStreamOptions(streams IOStreams) (remotecommand.StreamOpti
 
 // createExecutor returns the Executor or an error if one occurred.
 // NOTE: Borrowed from `kubectl attach`.
-func createExecutor(url *url.URL, config *restclient.Config) (remotecommand.Executor, error) {
+func createExecutor(url *url.URL, config *rest.Config) (remotecommand.Executor, error) {
 	exec, err := remotecommand.NewSPDYExecutor(config, "POST", url)
 	if err != nil {
 		return nil, err
@@ -723,11 +706,21 @@ func (c *Runner) List(ctx context.Context, opts ListOptions) (ConsoleSlice, erro
 
 // CreateResource builds a console according to the supplied options and submits it to the API
 func (c *Runner) CreateResource(namespace string, template workloadsv1alpha1.ConsoleTemplate, opts Options) (*workloadsv1alpha1.Console, error) {
+	lbls := labels.Merge(opts.Labels, template.Labels)
+
+	// There is no easy way to only invoke validation, so we convert the labels to
+	// a selector instead and discard its output, which will force the validation
+	// to happen
+	_, err := lbls.AsValidatedSelector()
+	if err != nil {
+		return nil, err
+	}
+
 	csl := &workloadsv1alpha1.Console{
 		ObjectMeta: metav1.ObjectMeta{
 			// Let Kubernetes generate a unique name
 			GenerateName: template.Name + "-",
-			Labels:       labels.Merge(labels.Set{}, template.Labels),
+			Labels:       lbls,
 			Namespace:    namespace,
 		},
 		Spec: workloadsv1alpha1.ConsoleSpec{
@@ -741,7 +734,7 @@ func (c *Runner) CreateResource(namespace string, template workloadsv1alpha1.Con
 		},
 	}
 
-	err := c.kubeClient.Create(
+	err = c.kubeClient.Create(
 		context.TODO(),
 		csl,
 	)
@@ -892,102 +885,77 @@ func (c *Runner) WaitUntilReady(ctx context.Context, createdCsl workloadsv1alpha
 	return csl, nil
 }
 
-var (
-	errConsoleNotFound             = errors.New("console not found")
-	errConsolePendingAuthorisation = errors.New("console pending authorisation")
-)
+var errConsolePendingAuthorisation = errors.New("console pending authorisation")
 
-func (c *Runner) waitForConsole(ctx context.Context, createdCsl workloadsv1alpha1.Console, waitForAuthorisation bool) (*workloadsv1alpha1.Console, error) {
-	isRunning := func(csl *workloadsv1alpha1.Console) bool {
-		return csl != nil && csl.Status.Phase == workloadsv1alpha1.ConsoleRunning
-	}
-	isPendingAuthorisation := func(csl *workloadsv1alpha1.Console) bool {
-		return !waitForAuthorisation &&
-			csl != nil &&
-			csl.Status.Phase == workloadsv1alpha1.ConsolePendingAuthorisation
-	}
-	isStopped := func(csl *workloadsv1alpha1.Console) bool {
-		return csl != nil && csl.Status.Phase == workloadsv1alpha1.ConsoleStopped
-	}
-
-	listOptions := metav1.SingleObject(createdCsl.ObjectMeta)
-	w, err := c.consoleClient.Namespace(createdCsl.Namespace).Watch(ctx, listOptions)
-	if err != nil {
-		return nil, fmt.Errorf("error watching console: %w", err)
-	}
-
-	// Get the console, because watch will only give us an event when something
-	// is changed, and the phase could have already stabilised before the watch
-	// is set up.
-	csl := &workloadsv1alpha1.Console{}
-
-	err = c.kubeClient.Get(ctx, client.ObjectKey{Name: createdCsl.Name, Namespace: createdCsl.Namespace}, csl)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("error retrieving console: %w", err)
-	}
-
-	// If the console is already running then there's nothing to do
-	if isRunning(csl) {
-		return csl, nil
-	}
-	if isPendingAuthorisation(csl) {
-		return csl, errConsolePendingAuthorisation
-	}
+// checkConsoleState returns (true, nil) when the console has reached a terminal
+// success state, (false, nil) to continue watching, or (true, err) on failure.
+func checkConsoleState(csl *workloadsv1alpha1.Console, waitForAuthorisation bool) (bool, error) {
+	switch csl.Status.Phase {
+	case workloadsv1alpha1.ConsoleRunning:
+		return true, nil
+	case workloadsv1alpha1.ConsolePendingAuthorisation:
+		if !waitForAuthorisation {
+			return true, errConsolePendingAuthorisation
+		}
+		return false, nil
 	// If the console has already stopped it may have already run to
 	// completion, so let's return it
-	if isStopped(csl) {
-		return csl, nil
+	case workloadsv1alpha1.ConsoleStopped:
+		return true, nil
+	default:
+		return false, nil
 	}
+}
 
-	status := w.ResultChan()
-	defer w.Stop()
+func (c *Runner) waitForConsole(ctx context.Context, createdCsl workloadsv1alpha1.Console, waitForAuthorisation bool) (*workloadsv1alpha1.Console, error) {
+	fieldSelector := fields.OneTermEqualSelector("metadata.name", createdCsl.Name).String()
+	namespacedCslClient := c.consoleClient.Namespace(createdCsl.Namespace)
+	lw := getListWatch(ctx, namespacedCslClient, fieldSelector)
 
-	for {
-		select {
-		case event, ok := <-status:
-			// If our channel is closed, exit with error, as we'll otherwise assume
-			// we were successful when we never reached this state.
-			if !ok {
-				return nil, errors.New("console watch channel closed")
-			}
+	var resultCsl *workloadsv1alpha1.Console
 
-			// We can ignore Bookmark events, because we aren't making requests using bookmarks.
-			//
-			// If we encounter an Error event, then igore this too.
-			// We'll instead wait until the channel is closed, or our context timeout is
-			// reached.
-			if event.Type == watch.Bookmark || event.Type == watch.Error {
-				continue
-			}
-
-			obj, ok := event.Object.(*unstructured.Unstructured)
-			if !ok {
-				return nil, fmt.Errorf("failed to cast watch event")
-			}
-
-			err = runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), csl)
-			if err != nil {
-				return nil, fmt.Errorf("error converting console object: %w", err)
-			}
-
-			if isRunning(csl) {
-				return csl, nil
-			}
-			if isPendingAuthorisation(csl) {
-				return csl, errConsolePendingAuthorisation
-			}
-			// If the console has already stopped it may have already run to
-			// completion, so let's return it
-			if isStopped(csl) {
-				return csl, nil
-			}
-		case <-ctx.Done():
-			if csl == nil {
-				return nil, fmt.Errorf("%s: %w", errConsoleNotFound, ctx.Err())
-			}
-			return nil, fmt.Errorf("console's last phase was: %v: %w", csl.Status.Phase, ctx.Err())
+	// Precondition checks the current state from the informer's cache
+	// before processing any watch events
+	precondition := func(store cache.Store) (bool, error) {
+		items := store.List()
+		if len(items) == 0 {
+			return false, nil // not found yet, wait for events
 		}
+		obj := items[0].(*unstructured.Unstructured)
+		csl := &workloadsv1alpha1.Console{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(
+			obj.UnstructuredContent(), csl,
+		); err != nil {
+			return false, err
+		}
+		done, err := checkConsoleState(csl, waitForAuthorisation)
+		if done {
+			resultCsl = csl
+		}
+		return done, err
 	}
+
+	// Condition processes each watch event
+	condition := func(event watch.Event) (bool, error) {
+		obj, ok := event.Object.(*unstructured.Unstructured)
+		if !ok {
+			return false, fmt.Errorf("unexpected event object: %v", reflect.TypeOf(event.Object))
+		}
+		csl := &workloadsv1alpha1.Console{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(
+			obj.UnstructuredContent(), csl,
+		); err != nil {
+			return false, err
+		}
+		done, err := checkConsoleState(csl, waitForAuthorisation)
+		if done {
+			resultCsl = csl
+		}
+		return done, err
+	}
+
+	_, err := watchtools.UntilWithSync(ctx, lw, &unstructured.Unstructured{}, precondition, condition)
+	return resultCsl, err
 }
 
 func (c *Runner) waitForRoleBinding(ctx context.Context, csl *workloadsv1alpha1.Console) error {
@@ -995,44 +963,29 @@ func (c *Runner) waitForRoleBinding(ctx context.Context, csl *workloadsv1alpha1.
 		return nil
 	}
 
-	rbClient := c.clientset.RbacV1().RoleBindings(csl.Namespace)
-	watcher, err := rbClient.Watch(context.TODO(), metav1.ListOptions{FieldSelector: "metadata.name=" + csl.Name})
-	if err != nil {
-		return fmt.Errorf("error watching rolebindings: %w", err)
-	}
-	defer watcher.Stop()
+	fieldSelector := fields.OneTermEqualSelector("metadata.name", csl.Name).String()
+	namespacedRBClient := c.clientset.RbacV1().RoleBindings(csl.Namespace)
+	lw := getListWatch(ctx, namespacedRBClient, fieldSelector)
 
-	// The Console controller might have already created a DirectoryRoleBinding
-	// and the DirectoryRoleBinding controller might have created the RoleBinding
-	// and updated its subject list by this point. If so, we are already done, and
-	// might never receive another event from our RoleBinding Watcher, causing the
-	// subsequent loop would block forever.
-	// If the associated RoleBinding exists and has the console user in its
-	// subject list, return early.
-	rb, err := rbClient.Get(context.TODO(), csl.Name, metav1.GetOptions{})
-	if err == nil && rbHasSubject(rb, csl.Spec.User) {
-		return nil
-	}
-
-	rbEvents := watcher.ResultChan()
-	for {
-		select {
-		case rbEvent, ok := <-rbEvents:
-			if !ok {
-				return errors.New("rolebinding event watcher channel closed")
-			}
-
-			rb := rbEvent.Object.(*rbacv1.RoleBinding)
-			if rbHasSubject(rb, csl.Spec.User) {
-				return nil
-			}
-
-			continue
-
-		case <-ctx.Done():
-			return fmt.Errorf("waiting for rolebinding interrupted: %w", ctx.Err())
+	precondition := func(store cache.Store) (bool, error) {
+		items := store.List()
+		if len(items) == 0 {
+			return false, nil
 		}
+		rb := items[0].(*rbacv1.RoleBinding)
+		return rbHasSubject(rb, csl.Spec.User), nil
 	}
+
+	condition := func(event watch.Event) (bool, error) {
+		rb, ok := event.Object.(*rbacv1.RoleBinding)
+		if !ok {
+			return false, fmt.Errorf("unexpected event object: %v", reflect.TypeOf(event.Object))
+		}
+		return rbHasSubject(rb, csl.Spec.User), nil
+	}
+
+	_, err := watchtools.UntilWithSync(ctx, lw, &rbacv1.RoleBinding{}, precondition, condition)
+	return err
 }
 
 func rbHasSubject(rb *rbacv1.RoleBinding, subjectName string) bool {

@@ -5,15 +5,17 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	workloadsv1alpha1 "github.com/gocardless/theatre/v4/apis/workloads/v1alpha1"
-	"github.com/gocardless/theatre/v4/pkg/workloads/console/runner"
+	workloadsv1alpha1 "github.com/gocardless/theatre/v5/api/workloads/v1alpha1"
+	"github.com/gocardless/theatre/v5/pkg/workloads/console/runner"
 )
 
 func newNamespace(name string) corev1.Namespace {
@@ -89,38 +91,38 @@ func newRoleBinding(namespace, name, username string) rbacv1.RoleBinding {
 
 }
 
-func mustCreateNamespace(namespace corev1.Namespace) {
+func mustCreateNamespace(namespace *corev1.Namespace) {
 	By("Creating test namespace: " + namespace.Name)
-	Expect(kubeClient.Create(context.TODO(), &namespace)).NotTo(
+	Expect(kubeClient.Create(context.TODO(), namespace)).NotTo(
 		HaveOccurred(), "failed to create test namespace",
 	)
 }
 
-func mustCreateConsoleTemplate(consoleTemplate workloadsv1alpha1.ConsoleTemplate) {
+func mustCreateConsoleTemplate(consoleTemplate *workloadsv1alpha1.ConsoleTemplate) {
 	By("Creating console template: " + consoleTemplate.Name)
-	Expect(kubeClient.Create(context.TODO(), &consoleTemplate)).NotTo(
+	Expect(kubeClient.Create(context.TODO(), consoleTemplate)).NotTo(
 		HaveOccurred(), "failed to create console template",
 	)
 }
 
-func mustCreateConsole(console workloadsv1alpha1.Console) {
+func mustCreateConsole(console *workloadsv1alpha1.Console) {
 	By("Creating console: " + console.Name)
-	Expect(kubeClient.Create(context.TODO(), &console)).NotTo(
+	Expect(kubeClient.Create(context.TODO(), console)).NotTo(
 		HaveOccurred(), "failed to create console ",
 	)
 }
 
-func mustCreateRoleBinding(roleBinding rbacv1.RoleBinding) {
+func mustCreateRoleBinding(roleBinding *rbacv1.RoleBinding) {
 	By("Creating role binding: " + roleBinding.Name)
-	Expect(kubeClient.Create(context.TODO(), &roleBinding)).NotTo(
+	Expect(kubeClient.Create(context.TODO(), roleBinding)).NotTo(
 		HaveOccurred(), "failed to create role binding",
 	)
 }
 
-func mustAddSubjectsToRoleBinding(rb rbacv1.RoleBinding, subjects []rbacv1.Subject) {
+func mustAddSubjectsToRoleBinding(rb *rbacv1.RoleBinding, subjects []rbacv1.Subject) {
 	rb.Subjects = subjects
 	Eventually(func() error {
-		return kubeClient.Update(context.TODO(), &rb)
+		return kubeClient.Update(context.TODO(), rb)
 	}, 2*time.Second).ShouldNot(HaveOccurred())
 }
 
@@ -151,35 +153,46 @@ var _ = Describe("Runner", func() {
 			console         workloadsv1alpha1.Console
 			consoleTemplate workloadsv1alpha1.ConsoleTemplate
 			err             error
+			consoleLabels   labels.Set
 		)
 
 		cmd := []string{"/bin/rails", "console"}
 		reason := "reason for console"
-		createOptions := runner.Options{Cmd: cmd, Reason: reason}
 
 		BeforeEach(func() {
 			namespace = newNamespace("")
-			mustCreateNamespace(namespace)
+			mustCreateNamespace(&namespace)
 
 			consoleTemplate = newConsoleTemplate(namespace.Name, "test", map[string]string{"release": "test"})
 		})
 
 		JustBeforeEach(func() {
 			var csl *workloadsv1alpha1.Console
+
+			createOptions := runner.Options{Cmd: cmd, Reason: reason, Labels: consoleLabels}
 			csl, err = consoleRunner.CreateResource(namespace.Name, consoleTemplate, createOptions)
-			console = *csl
+
+			if err == nil {
+				Expect(csl).NotTo(BeNil(), "a console was not returned")
+				console = *csl
+			}
 		})
 
 		Context("Successfully creates a new console", func() {
+			BeforeEach(func() {
+				consoleLabels = labels.Set(map[string]string{
+					"custom_key": "custom_value",
+				})
+			})
+
 			It("Creates a new console", func() {
 				By("Returning a console")
 				Expect(err).NotTo(HaveOccurred())
-				Expect(console).NotTo(BeNil(), "a console was not returned")
 
 				By("Referencing the template in the returned console spec")
 				Expect(console.Spec.ConsoleTemplateRef.Name).To(Equal(consoleTemplate.Name))
 
-				By("Seting the specified command in the spec")
+				By("Setting the specified command in the spec")
 				Expect(console.Spec.Command).To(Equal(cmd))
 
 				By("Setting the specified reason in the spec")
@@ -187,6 +200,9 @@ var _ = Describe("Runner", func() {
 
 				By("Inheriting labels from console template")
 				Expect(console.Labels).To(HaveKeyWithValue("release", "test"))
+
+				By("Inheriting custom labels")
+				Expect(console.Labels).To(HaveKeyWithValue("custom_key", "custom_value"))
 
 				By("Creating the console")
 				Eventually(func() error {
@@ -203,6 +219,19 @@ var _ = Describe("Runner", func() {
 				}).Should(HaveLen(1), "only one console should be present")
 			})
 		})
+
+		Context("When a new console can't be created", func() {
+			BeforeEach(func() {
+				consoleLabels = labels.Set(map[string]string{
+					"this is an invalid label": "this is an invalid value",
+				})
+			})
+
+			It("Fails to create a new console", func() {
+				By("Returning an error")
+				Expect(err).To(HaveOccurred())
+			})
+		})
 	})
 
 	Describe("FindTemplateBySelector", func() {
@@ -213,13 +242,13 @@ var _ = Describe("Runner", func() {
 
 		BeforeEach(func() {
 			namespace = newNamespace("")
-			mustCreateNamespace(namespace)
+			mustCreateNamespace(&namespace)
 
 			consoleTemplate = newConsoleTemplate(namespace.Name, "test", map[string]string{"release": "test"})
 		})
 
 		JustBeforeEach(func() {
-			mustCreateConsoleTemplate(consoleTemplate)
+			mustCreateConsoleTemplate(&consoleTemplate)
 		})
 
 		Context("Successfully finds template", func() {
@@ -233,7 +262,7 @@ var _ = Describe("Runner", func() {
 		Context("Unsuccessfully finds a template", func() {
 			JustBeforeEach(func() {
 				consoleTemplate = newConsoleTemplate(namespace.Name, "test-2", map[string]string{"release": "test"})
-				mustCreateConsoleTemplate(consoleTemplate)
+				mustCreateConsoleTemplate(&consoleTemplate)
 			})
 
 			It("Fails to find non-existent template", func() {
@@ -273,11 +302,17 @@ var _ = Describe("Runner", func() {
 		})
 
 		JustBeforeEach(func() {
-			mustCreateNamespace(namespace)
-			mustCreateConsoleTemplate(consoleTemplate)
-			mustCreateConsole(console)
-			mustCreateRoleBinding(roleBinding)
+			mustCreateNamespace(&namespace)
+			mustCreateConsoleTemplate(&consoleTemplate)
+			mustCreateConsole(&console)
+			mustCreateRoleBinding(&roleBinding)
 		})
+
+		AssertWaitContextTimeoutErr := func(ctx context.Context, err error) {
+			Expect(err).To(HaveOccurred())
+			Expect(wait.Interrupted(err)).To(BeTrue())
+			Expect(ctx.Err()).To(MatchError(context.DeadlineExceeded), "context should have timed out")
+		}
 
 		Context("When console phase is Pending", func() {
 			It("Fails with a timeout waiting", func() {
@@ -285,8 +320,7 @@ var _ = Describe("Runner", func() {
 				defer cancel()
 				_, err := consoleRunner.WaitUntilReady(ctx, console, true)
 
-				Expect(err.Error()).To(ContainSubstring("last phase was: Pending"))
-				Expect(ctx.Err()).To(MatchError(context.DeadlineExceeded), "context should have timed out")
+				AssertWaitContextTimeoutErr(ctx, err)
 			})
 		})
 
@@ -362,30 +396,46 @@ var _ = Describe("Runner", func() {
 				defer cancel()
 				_, err := consoleRunner.WaitUntilReady(ctx, console, true)
 
-				Expect(err.Error()).To(ContainSubstring("context deadline exceeded"))
-				Expect(ctx.Err()).To(MatchError(context.DeadlineExceeded), "context should have timed out")
+				AssertWaitContextTimeoutErr(ctx, err)
 			})
 		})
 
-		Context("When waiting for console to exist", func() {
-			It("Returns successfully", func() {
-				csl := newConsole(namespace.Name, "idontexistyet", consoleTemplate.Name, "test-user", map[string]string{})
-				csl.Status.Phase = workloadsv1alpha1.ConsoleRunning
+		Context("When console transitions from PendingAuthorisation to Running", func() {
+			BeforeEach(func() {
+				console.Status.Phase = workloadsv1alpha1.ConsolePendingAuthorisation
+			})
+
+			It("Returns successfully after the transition", func() {
 				time.AfterFunc(timeout/2,
 					func() {
 						defer GinkgoRecover()
-						mustCreateConsole(csl)
-					})
-
-				rb := newRoleBinding(namespace.Name, csl.Name, csl.Spec.User)
-				mustCreateRoleBinding(rb)
+						mustUpdateConsolePhase(console, workloadsv1alpha1.ConsoleRunning)
+					},
+				)
 
 				ctx, cancel := context.WithTimeout(context.Background(), timeout)
 				defer cancel()
-				upToDateCsl, err := consoleRunner.WaitUntilReady(ctx, csl, true)
+				upToDateCsl, err := consoleRunner.WaitUntilReady(ctx, console, true)
 
 				Expect(err).ToNot(HaveOccurred())
 				Expect(upToDateCsl.Status.Phase).To(Equal(workloadsv1alpha1.ConsoleRunning))
+			})
+		})
+
+		Context("When console enters PendingAuthorisation with waitForAuthorisation=false", func() {
+			It("Returns with pending authorisation error", func() {
+				time.AfterFunc(timeout/2,
+					func() {
+						defer GinkgoRecover()
+						mustUpdateConsolePhase(console, workloadsv1alpha1.ConsolePendingAuthorisation)
+					},
+				)
+
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				_, err := consoleRunner.WaitUntilReady(ctx, console, false)
+
+				Expect(err).To(MatchError(ContainSubstring("console pending authorisation")))
 			})
 		})
 
@@ -394,14 +444,13 @@ var _ = Describe("Runner", func() {
 				It("Fails with a timeout", func() {
 					csl := newConsole(namespace.Name, "consolewithoutrolebinding", consoleTemplate.Name, "test-user", map[string]string{})
 					csl.Status.Phase = workloadsv1alpha1.ConsoleRunning
-					mustCreateConsole(csl)
+					mustCreateConsole(&csl)
 
 					ctx, cancel := context.WithTimeout(context.Background(), timeout)
 					defer cancel()
 					_, err := consoleRunner.WaitUntilReady(ctx, csl, true)
 
-					Expect(err).To(MatchError(ContainSubstring("waiting for rolebinding interrupted")))
-					Expect(ctx.Err()).To(MatchError(context.DeadlineExceeded), "context should have timed out")
+					AssertWaitContextTimeoutErr(ctx, err)
 				})
 			})
 
@@ -409,13 +458,13 @@ var _ = Describe("Runner", func() {
 				It("Returns success", func() {
 					csl := newConsole(namespace.Name, "consolewithoutrolebinding", consoleTemplate.Name, "test-user", map[string]string{})
 					csl.Status.Phase = workloadsv1alpha1.ConsoleRunning
-					mustCreateConsole(csl)
+					mustCreateConsole(&csl)
 
 					rb := newRoleBinding(namespace.Name, csl.Name, csl.Spec.User)
 					time.AfterFunc(timeout/2,
 						func() {
 							defer GinkgoRecover()
-							mustCreateRoleBinding(rb)
+							mustCreateRoleBinding(&rb)
 						})
 
 					ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -430,18 +479,17 @@ var _ = Describe("Runner", func() {
 				It("Fails with a timeout", func() {
 					csl := newConsole(namespace.Name, "norolebindingsubjects", consoleTemplate.Name, "test-user", map[string]string{})
 					csl.Status.Phase = workloadsv1alpha1.ConsoleRunning
-					mustCreateConsole(csl)
+					mustCreateConsole(&csl)
 
 					rb := newRoleBinding(namespace.Name, csl.Name, csl.Spec.User)
 					rb.Subjects = nil
-					mustCreateRoleBinding(rb)
+					mustCreateRoleBinding(&rb)
 
 					ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
 					defer cancel()
 					_, err := consoleRunner.WaitUntilReady(ctx, csl, true)
 
-					Expect(err).To(MatchError(ContainSubstring("waiting for rolebinding interrupted")))
-					Expect(ctx.Err()).To(MatchError(context.DeadlineExceeded), "context should have timed out")
+					AssertWaitContextTimeoutErr(ctx, err)
 				})
 			})
 
@@ -449,16 +497,16 @@ var _ = Describe("Runner", func() {
 				It("Returns success", func() {
 					csl := newConsole(namespace.Name, "norolebindingsubjects", consoleTemplate.Name, "test-user", map[string]string{})
 					csl.Status.Phase = workloadsv1alpha1.ConsoleRunning
-					mustCreateConsole(csl)
+					mustCreateConsole(&csl)
 
 					rb := newRoleBinding(namespace.Name, csl.Name, csl.Spec.User)
 					rb.Subjects = nil
-					mustCreateRoleBinding(rb)
+					mustCreateRoleBinding(&rb)
 
 					time.AfterFunc(timeout/2,
 						func() {
 							defer GinkgoRecover()
-							mustAddSubjectsToRoleBinding(rb, []rbacv1.Subject{{Kind: "User", Name: csl.Spec.User}})
+							mustAddSubjectsToRoleBinding(&rb, []rbacv1.Subject{{Kind: "User", Name: csl.Spec.User}})
 						},
 					)
 
@@ -474,16 +522,16 @@ var _ = Describe("Runner", func() {
 				It("Fails with a timeout", func() {
 					csl := newConsole(namespace.Name, "norolebindingsubjects", consoleTemplate.Name, "test-user", map[string]string{})
 					csl.Status.Phase = workloadsv1alpha1.ConsoleRunning
-					mustCreateConsole(csl)
+					mustCreateConsole(&csl)
 
 					rb := newRoleBinding(namespace.Name, csl.Name, csl.Spec.User)
 					rb.Subjects = nil
-					mustCreateRoleBinding(rb)
+					mustCreateRoleBinding(&rb)
 
 					time.AfterFunc(timeout/2,
 						func() {
 							defer GinkgoRecover()
-							mustAddSubjectsToRoleBinding(rb, []rbacv1.Subject{{Kind: "User", Name: "rando"}})
+							mustAddSubjectsToRoleBinding(&rb, []rbacv1.Subject{{Kind: "User", Name: "rando"}})
 						},
 					)
 
@@ -491,8 +539,7 @@ var _ = Describe("Runner", func() {
 					defer cancel()
 					_, err := consoleRunner.WaitUntilReady(ctx, csl, true)
 
-					Expect(err).To(MatchError(ContainSubstring("waiting for rolebinding interrupted")))
-					Expect(ctx.Err()).To(MatchError(context.DeadlineExceeded), "context should have timed out")
+					AssertWaitContextTimeoutErr(ctx, err)
 				})
 			})
 		})
