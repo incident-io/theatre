@@ -91,6 +91,13 @@ type ConsoleReconciler struct {
 	// Use DRBs for RBAC on console objects
 	EnableDirectoryRoleBinding bool
 
+	// Bind approvers to a separate Role that allows attach and logs but not
+	// exec, instead of the creator's Role
+	ApproversWithoutExec bool
+	// Usernames that get neither the creator's nor the approvers' Role on a
+	// console, even if they created or approved it
+	SubjectsWithoutAccess []string
+
 	// Enable injection of console session recording using tlog
 	EnableSessionRecording bool
 	// The image reference for the sidecar to inject to stream session
@@ -144,35 +151,111 @@ func (r *ConsoleReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 
 func (r *ConsoleReconciler) createOrUpdateUserRbac(logger logr.Logger, ctx context.Context, tpl *workloadsv1alpha1.ConsoleTemplate, req ctrl.Request, csl *workloadsv1alpha1.Console, authorisation *workloadsv1alpha1.ConsoleAuthorisation) error {
 
+	userSubjects, approverSubjects := r.userRbacSubjects(tpl, csl, authorisation)
+
 	// Create or update the user role
 	role := buildUserRole(req.NamespacedName, csl.Status.PodName)
 	if err := r.createOrUpdate(ctx, logger, csl, role, Role, recutil.RoleDiff); err != nil {
 		return errors.Wrap(err, "failed to create role for user")
 	}
 
-	// Create or update the role binding
-	subjects := append(
-		tpl.Spec.AdditionalAttachSubjects,
-		rbacv1.Subject{Kind: "User", Name: csl.Spec.User},
-	)
-	// Append all the authorising users to allow them to attach
-	if authorisation != nil {
-		subjects = append(subjects, authorisation.Spec.Authorisations...)
+	if err := r.createOrUpdateRoleBinding(ctx, logger, csl, req.NamespacedName, role, userSubjects); err != nil {
+		return errors.Wrap(err, "failed to create rolebinding for user")
 	}
 
-	if r.EnableDirectoryRoleBinding {
-		drb := buildUserDirectoryRoleBinding(req.NamespacedName, role, subjects)
-		if err := r.createOrUpdate(ctx, logger, csl, drb, DirectoryRoleBinding, recutil.DirectoryRoleBindingDiff); err != nil {
-			return errors.Wrap(err, "failed to create directory rolebinding for user")
-		}
-	} else {
-		rb := buildUserRoleBinding(req.NamespacedName, role, subjects)
-		if err := r.createOrUpdate(ctx, logger, csl, rb, RoleBinding, recutil.RoleBindingDiff); err != nil {
-			return errors.Wrap(err, "failed to create rolebinding for user")
-		}
+	if !r.ApproversWithoutExec {
+		return nil
+	}
+
+	// We already create roles and rolebindings with the same name as the
+	// console, so suffix the console name with '-approvers'.
+	approverName := types.NamespacedName{
+		Name:      fmt.Sprintf("%s-%s", req.Name, "approvers"),
+		Namespace: req.Namespace,
+	}
+
+	approverRole := buildApproverRole(approverName, csl.Status.PodName)
+	if err := r.createOrUpdate(ctx, logger, csl, approverRole, Role, recutil.RoleDiff); err != nil {
+		return errors.Wrap(err, "failed to create role for approvers")
+	}
+
+	// The binding is created even when nobody has approved yet, so that an
+	// approval only ever has to update it.
+	if err := r.createOrUpdateRoleBinding(ctx, logger, csl, approverName, approverRole, approverSubjects); err != nil {
+		return errors.Wrap(err, "failed to create rolebinding for approvers")
 	}
 
 	return nil
+}
+
+// userRbacSubjects returns the subjects to bind to the user Role and, when
+// ApproversWithoutExec is set, to the approver Role.
+//
+// With ApproversWithoutExec unset, approvers share the creator's Role (and so
+// get exec), and approverSubjects is empty. Subjects whose username is listed
+// in SubjectsWithoutAccess are left out of both.
+func (r *ConsoleReconciler) userRbacSubjects(tpl *workloadsv1alpha1.ConsoleTemplate, csl *workloadsv1alpha1.Console, authorisation *workloadsv1alpha1.ConsoleAuthorisation) (userSubjects, approverSubjects []rbacv1.Subject) {
+	userSubjects = make([]rbacv1.Subject, 0, len(tpl.Spec.AdditionalAttachSubjects)+1)
+	userSubjects = append(userSubjects, tpl.Spec.AdditionalAttachSubjects...)
+	userSubjects = append(userSubjects, rbacv1.Subject{Kind: "User", Name: csl.Spec.User})
+
+	approverSubjects = []rbacv1.Subject{}
+	if authorisation != nil {
+		if r.ApproversWithoutExec {
+			approverSubjects = append(approverSubjects, authorisation.Spec.Authorisations...)
+		} else {
+			userSubjects = append(userSubjects, authorisation.Spec.Authorisations...)
+		}
+	}
+
+	return r.withoutAccessFiltered(userSubjects), r.withoutAccessFiltered(approverSubjects)
+}
+
+func (r *ConsoleReconciler) withoutAccessFiltered(subjects []rbacv1.Subject) []rbacv1.Subject {
+	if len(r.SubjectsWithoutAccess) == 0 {
+		return subjects
+	}
+
+	filtered := make([]rbacv1.Subject, 0, len(subjects))
+	for _, s := range subjects {
+		if !r.hasNoAccess(s) {
+			filtered = append(filtered, s)
+		}
+	}
+
+	return filtered
+}
+
+// hasNoAccess reports whether the subject's Kubernetes username is listed in
+// SubjectsWithoutAccess. Group subjects have no username, so never match.
+func (r *ConsoleReconciler) hasNoAccess(s rbacv1.Subject) bool {
+	var username string
+	switch s.Kind {
+	case rbacv1.UserKind:
+		username = s.Name
+	case rbacv1.ServiceAccountKind:
+		username = fmt.Sprintf("system:serviceaccount:%s:%s", s.Namespace, s.Name)
+	default:
+		return false
+	}
+
+	for _, u := range r.SubjectsWithoutAccess {
+		if u == username {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (r *ConsoleReconciler) createOrUpdateRoleBinding(ctx context.Context, logger logr.Logger, csl *workloadsv1alpha1.Console, name types.NamespacedName, role *rbacv1.Role, subjects []rbacv1.Subject) error {
+	if r.EnableDirectoryRoleBinding {
+		drb := buildUserDirectoryRoleBinding(name, role, subjects)
+		return r.createOrUpdate(ctx, logger, csl, drb, DirectoryRoleBinding, recutil.DirectoryRoleBindingDiff)
+	}
+
+	rb := buildUserRoleBinding(name, role, subjects)
+	return r.createOrUpdate(ctx, logger, csl, rb, RoleBinding, recutil.RoleBindingDiff)
 }
 
 func (r *ConsoleReconciler) createOrUpdateServiceRbac(logger logr.Logger, ctx context.Context, tpl *workloadsv1alpha1.ConsoleTemplate, req ctrl.Request, csl *workloadsv1alpha1.Console, authorisation *workloadsv1alpha1.ConsoleAuthorisation) error {
@@ -1084,6 +1167,37 @@ func buildUserRole(name types.NamespacedName, podName string) *rbacv1.Role {
 			},
 			{
 				Verbs:         []string{"get", "delete"},
+				APIGroups:     []string{""},
+				Resources:     []string{"pods"},
+				ResourceNames: []string{podName},
+			},
+		},
+	}
+}
+
+// buildApproverRole is buildUserRole without exec or delete. kubectl attach
+// reads the pod before attaching, so approvers keep get on it.
+func buildApproverRole(name types.NamespacedName, podName string) *rbacv1.Role {
+	return &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name.Name,
+			Namespace: name.Namespace,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				Verbs:         []string{"create"},
+				APIGroups:     []string{""},
+				Resources:     []string{"pods/attach"},
+				ResourceNames: []string{podName},
+			},
+			{
+				Verbs:         []string{"get"},
+				APIGroups:     []string{""},
+				Resources:     []string{"pods/log"},
+				ResourceNames: []string{podName},
+			},
+			{
+				Verbs:         []string{"get"},
 				APIGroups:     []string{""},
 				Resources:     []string{"pods"},
 				ResourceNames: []string{podName},
