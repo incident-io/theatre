@@ -167,6 +167,18 @@ var _ = Describe("Authorisation webhook", func() {
 			})
 		})
 
+		// A Group subject named after the caller would otherwise pass the
+		// "only the current user" check and bind that group's members.
+		Context("Adding an authoriser as an RBAC Group subject named after the caller", func() {
+			BeforeEach(func() {
+				updateFixture = "./testdata/console_authorisation_update_add_rbac_group_kind.yaml"
+			})
+
+			It("Returns an error", func() {
+				Expect(err).To(MatchError(ContainSubstring(`an authoriser must be a User subject, got "Group"`)))
+			})
+		})
+
 		Context("Adding an authoriser belonging to a foreign apiGroup", func() {
 			BeforeEach(func() {
 				updateFixture = "./testdata/console_authorisation_update_add_foreign_apigroup.yaml"

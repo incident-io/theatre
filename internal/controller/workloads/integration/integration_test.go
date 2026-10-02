@@ -14,7 +14,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	rbacv1alpha1 "github.com/gocardless/theatre/v5/api/rbac/v1alpha1"
 	workloadsv1alpha1 "github.com/gocardless/theatre/v5/api/workloads/v1alpha1"
@@ -651,6 +653,79 @@ var _ = Describe("Console", func() {
 						err := mgr.GetClient().Get(context.TODO(), identifier, &workloadsv1alpha1.Console{})
 						return apierrors.ReasonForError(err)
 					}, 10*time.Second).Should(Equal(metav1.StatusReasonNotFound), "expected not to find console, but did")
+				})
+			})
+
+			Context("When approvers update the authorisation through the API server", func() {
+				var (
+					approverClient func(name string) client.Client
+					mustGetAuth    func() *workloadsv1alpha1.ConsoleAuthorisation
+				)
+
+				BeforeEach(func() {
+					approverClient = func(name string) client.Client {
+						user, err := testEnv.AddUser(
+							envtest.User{Name: name, Groups: []string{"system:masters"}},
+							&rest.Config{},
+						)
+						Expect(err).NotTo(HaveOccurred())
+
+						c, err := client.New(user.Config(), client.Options{Scheme: mgr.GetScheme()})
+						Expect(err).NotTo(HaveOccurred())
+
+						return c
+					}
+
+					mustGetAuth = func() *workloadsv1alpha1.ConsoleAuthorisation {
+						auth := &workloadsv1alpha1.ConsoleAuthorisation{}
+						Eventually(func() error {
+							return mgr.GetClient().Get(context.TODO(), client.ObjectKeyFromObject(csl), auth)
+						}).ShouldNot(HaveOccurred(), "failed to find consoleauthorisation")
+
+						return auth
+					}
+				})
+
+				It("accepts a User approval once and rejects the same user approving again", func() {
+					approver := approverClient("authorising-user-2@example.com")
+
+					auth := mustGetAuth()
+					auth.Spec.Authorisations = append(auth.Spec.Authorisations,
+						rbacv1.Subject{Kind: rbacv1.UserKind, Name: "authorising-user-2@example.com"},
+					)
+					Expect(approver.Update(context.TODO(), auth)).To(Succeed())
+
+					By("Expect the console to move past pending authorisation")
+					Eventually(func() workloadsv1alpha1.ConsolePhase {
+						updated := &workloadsv1alpha1.Console{}
+						mgr.GetClient().Get(context.TODO(), client.ObjectKeyFromObject(csl), updated)
+						return updated.Status.Phase
+					}).ShouldNot(Or(BeEmpty(), Equal(workloadsv1alpha1.ConsolePendingAuthorisation)))
+
+					By("Expect a second approval by the same user to be rejected")
+					auth = mustGetAuth()
+					auth.Spec.Authorisations = append(auth.Spec.Authorisations,
+						rbacv1.Subject{Kind: rbacv1.UserKind, Name: "authorising-user-2@example.com", Namespace: namespaceName},
+					)
+					err := approver.Update(context.TODO(), auth)
+					Expect(err).To(HaveOccurred())
+					Expect(err.Error()).To(ContainSubstring("this user has already authorised the console"))
+
+					Expect(mustGetAuth().Spec.Authorisations).To(HaveLen(1))
+				})
+
+				It("rejects a Group-kind approval named after the caller", func() {
+					approver := approverClient("authorising-user-2@example.com")
+
+					auth := mustGetAuth()
+					auth.Spec.Authorisations = append(auth.Spec.Authorisations,
+						rbacv1.Subject{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "authorising-user-2@example.com"},
+					)
+					err := approver.Update(context.TODO(), auth)
+					Expect(err).To(HaveOccurred())
+					Expect(err.Error()).To(ContainSubstring(`an authoriser must be a User subject, got "Group"`))
+
+					Expect(mustGetAuth().Spec.Authorisations).To(BeEmpty())
 				})
 			})
 		})
