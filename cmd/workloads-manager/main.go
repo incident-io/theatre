@@ -123,6 +123,7 @@ func main() {
 	// console authenticator webhook
 	mgr.GetWebhookServer().Register("/mutate-consoles", &admission.Webhook{
 		Handler: internalworkloadsv1alpha1.NewConsoleAuthenticatorWebhook(
+			mgr.GetAPIReader(),
 			lifecycleRecorder,
 			logger.WithName("webhooks").WithName("console-authenticator"),
 			mgr.GetScheme(),

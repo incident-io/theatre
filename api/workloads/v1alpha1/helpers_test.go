@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	rbacv1 "k8s.io/api/rbac/v1"
 )
 
 var _ = Describe("Helpers", func() {
@@ -366,6 +367,112 @@ var _ = Describe("Helpers", func() {
 			It("returns an error", func() {
 				Expect(err).To(HaveOccurred())
 				Expect(err).To(MatchError(ContainSubstring(".spec.defaultAuthorisationRule must be set if authorisation rules are defined")))
+			})
+		})
+
+		Context("with valid creator rules", func() {
+			BeforeEach(func() {
+				template.Spec.CreatorRules = []rbacv1.Subject{
+					{Kind: rbacv1.UserKind, Name: "buildkite@example.com"},
+					{Kind: rbacv1.GroupKind, Name: "deployers@example.com"},
+					{Kind: rbacv1.ServiceAccountKind, Namespace: "ci", Name: "deployer"},
+				}
+			})
+
+			It("returns no error", func() {
+				Expect(err).NotTo(HaveOccurred())
+			})
+		})
+
+		Context("with a creator rule of an unsupported kind", func() {
+			BeforeEach(func() {
+				template.Spec.CreatorRules = []rbacv1.Subject{
+					{Kind: "GoogleGroup", Name: "deployers@example.com"},
+				}
+			})
+
+			It("returns an error", func() {
+				Expect(err).To(MatchError(ContainSubstring(`.spec.creatorRules[0]: kind must be one of User, Group or ServiceAccount, got "GoogleGroup"`)))
+			})
+		})
+
+		Context("with a ServiceAccount creator rule without a namespace", func() {
+			BeforeEach(func() {
+				template.Spec.CreatorRules = []rbacv1.Subject{
+					{Kind: rbacv1.ServiceAccountKind, Name: "deployer"},
+				}
+			})
+
+			It("returns an error", func() {
+				Expect(err).To(MatchError(ContainSubstring(".spec.creatorRules[0]: a ServiceAccount subject must set its namespace")))
+			})
+		})
+	})
+
+	Describe("ConsoleTemplate AllowsCreator", func() {
+		var (
+			template ConsoleTemplate
+			username string
+			groups   []string
+		)
+
+		BeforeEach(func() {
+			template = ConsoleTemplate{}
+			username = "someone@example.com"
+			groups = []string{"system:authenticated", "engineers@example.com"}
+		})
+
+		allows := func() bool {
+			return template.AllowsCreator(username, groups)
+		}
+
+		Context("with no creator rules", func() {
+			It("allows anyone", func() {
+				Expect(allows()).To(BeTrue())
+			})
+		})
+
+		Context("with creator rules", func() {
+			BeforeEach(func() {
+				template.Spec.CreatorRules = []rbacv1.Subject{
+					{Kind: rbacv1.UserKind, Name: "buildkite@example.com"},
+					{Kind: rbacv1.GroupKind, Name: "deployers@example.com"},
+					{Kind: rbacv1.ServiceAccountKind, Namespace: "ci", Name: "deployer"},
+				}
+			})
+
+			It("rejects a caller who isn't listed", func() {
+				Expect(allows()).To(BeFalse())
+			})
+
+			It("rejects a system:masters caller who isn't listed", func() {
+				groups = append(groups, "system:masters")
+				Expect(allows()).To(BeFalse())
+			})
+
+			It("allows a listed user", func() {
+				username = "buildkite@example.com"
+				Expect(allows()).To(BeTrue())
+			})
+
+			It("allows a member of a listed group", func() {
+				groups = append(groups, "deployers@example.com")
+				Expect(allows()).To(BeTrue())
+			})
+
+			It("allows a listed service account", func() {
+				username = "system:serviceaccount:ci:deployer"
+				Expect(allows()).To(BeTrue())
+			})
+
+			It("doesn't match a user whose name is a listed group", func() {
+				username = "deployers@example.com"
+				Expect(allows()).To(BeFalse())
+			})
+
+			It("doesn't match a group whose name is a listed user", func() {
+				groups = append(groups, "buildkite@example.com")
+				Expect(allows()).To(BeFalse())
 			})
 		})
 	})

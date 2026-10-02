@@ -92,6 +92,13 @@ type ConsoleTemplateSpec struct {
 	// Default authorisation rule to use if no authorisation rules are defined or no authorisation rules match.
 	// +optional
 	DefaultAuthorisationRule *ConsoleAuthorisers `json:"defaultAuthorisationRule,omitempty"`
+
+	// Subjects allowed to create Consoles from this template, matched against
+	// the creating request's username and groups. Supported kinds are User,
+	// Group and ServiceAccount; a ServiceAccount must set its namespace. If
+	// empty or unset, anyone with RBAC permission to create Consoles can.
+	// +optional
+	CreatorRules []rbacv1.Subject `json:"creatorRules,omitempty"`
 }
 
 // ConsoleTemplateStatus defines the observed state of ConsoleTemplate
