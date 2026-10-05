@@ -1,10 +1,12 @@
 package v1alpha1
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
+	rbacv1 "k8s.io/api/rbac/v1"
 )
 
 // Creating returns true if the console has no status (the console has just been created)
@@ -249,5 +251,58 @@ func (ct *ConsoleTemplate) Validate() error {
 		))
 	}
 
+	// A subject that can never match would lock everyone out of the template
+	// without saying why, so reject it here instead.
+	for i, s := range ct.Spec.CreatorRules {
+		switch s.Kind {
+		case rbacv1.UserKind, rbacv1.GroupKind:
+		case rbacv1.ServiceAccountKind:
+			if s.Namespace == "" {
+				err = multierror.Append(err, errors.Errorf(
+					".spec.creatorRules[%d]: a ServiceAccount subject must set its namespace", i,
+				))
+			}
+		default:
+			err = multierror.Append(err, errors.Errorf(
+				".spec.creatorRules[%d]: kind must be one of %s, %s or %s, got %q",
+				i, rbacv1.UserKind, rbacv1.GroupKind, rbacv1.ServiceAccountKind, s.Kind,
+			))
+		}
+
+		if s.Name == "" {
+			err = multierror.Append(err, errors.Errorf(".spec.creatorRules[%d]: name must be set", i))
+		}
+	}
+
 	return err
+}
+
+// AllowsCreator reports whether a request from the given username and groups
+// may create a Console from this template. A template without creatorRules
+// allows everyone.
+func (ct *ConsoleTemplate) AllowsCreator(username string, groups []string) bool {
+	if len(ct.Spec.CreatorRules) == 0 {
+		return true
+	}
+
+	for _, s := range ct.Spec.CreatorRules {
+		switch s.Kind {
+		case rbacv1.UserKind:
+			if s.Name == username {
+				return true
+			}
+		case rbacv1.GroupKind:
+			for _, g := range groups {
+				if s.Name == g {
+					return true
+				}
+			}
+		case rbacv1.ServiceAccountKind:
+			if s.Namespace != "" && fmt.Sprintf("system:serviceaccount:%s:%s", s.Namespace, s.Name) == username {
+				return true
+			}
+		}
+	}
+
+	return false
 }
