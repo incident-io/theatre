@@ -639,6 +639,60 @@ var _ = Describe("Console", func() {
 				Expect(drb.ObjectMeta.OwnerReferences[0].Name).To(Equal(csl.ObjectMeta.Name))
 			})
 
+			Context("When restrict-approver-role is off", func() {
+				It("binds the approver to the creator's role", func() {
+					user, err := testEnv.AddUser(
+						envtest.User{Name: "authorising-user-2@example.com", Groups: []string{"system:masters"}},
+						&rest.Config{},
+					)
+					Expect(err).NotTo(HaveOccurred())
+					approver, err := client.New(user.Config(), client.Options{Scheme: mgr.GetScheme()})
+					Expect(err).NotTo(HaveOccurred())
+
+					By("Approving the console")
+					Eventually(func() error {
+						auth := &workloadsv1alpha1.ConsoleAuthorisation{}
+						if err := approver.Get(context.TODO(), client.ObjectKeyFromObject(csl), auth); err != nil {
+							return err
+						}
+						auth.Spec.Authorisations = append(auth.Spec.Authorisations,
+							rbacv1.Subject{Kind: rbacv1.UserKind, Name: "authorising-user-2@example.com"},
+						)
+						return approver.Update(context.TODO(), auth)
+					}).Should(Succeed())
+
+					By("Creating a running pod for the console's job")
+					pod := &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      fmt.Sprintf("%s-console-abcde", consoleName),
+							Namespace: namespaceName,
+							Labels:    labels.Set{"job-name": fmt.Sprintf("%s-console", consoleName)},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Image: "alpine:latest", Name: "console-container-0"}},
+						},
+					}
+					Expect(mgr.GetClient().Create(context.TODO(), pod)).To(Succeed())
+					pod.Status.Phase = corev1.PodRunning
+					Expect(mgr.GetClient().Status().Update(context.TODO(), pod)).To(Succeed())
+
+					drb := &rbacv1alpha1.DirectoryRoleBinding{}
+					Eventually(func() []rbacv1.Subject {
+						mgr.GetClient().Get(context.TODO(), client.ObjectKeyFromObject(csl), drb)
+						return drb.Spec.Subjects
+					}).Should(ContainElement(
+						rbacv1.Subject{Kind: rbacv1.UserKind, Name: "authorising-user-2@example.com"},
+					))
+					Expect(drb.Spec.RoleRef.Name).To(Equal(consoleName))
+
+					By("Expect no separate approvers role")
+					err = mgr.GetClient().Get(context.TODO(), client.ObjectKey{
+						Namespace: namespaceName, Name: fmt.Sprintf("%s-approvers", consoleName),
+					}, &rbacv1.Role{})
+					Expect(apierrors.IsNotFound(err)).To(BeTrue())
+				})
+			})
+
 			Context("When the console requires authorisation", func() {
 				BeforeEach(func() {
 					ttl := int32(1)
