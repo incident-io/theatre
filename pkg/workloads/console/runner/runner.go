@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"text/tabwriter"
 	"time"
 
@@ -295,8 +296,60 @@ func checkPodState(pod *corev1.Pod) (bool, error) {
 	}
 }
 
+// checkAttachedContainerState is checkPodState for the container we attach to. Once that
+// container has terminated the console is over, even if the pod's phase hasn't caught up
+// yet, and its exit code decides the result.
+func checkAttachedContainerState(pod *corev1.Pod, containerName string) (bool, error) {
+	if terminated := terminatedState(pod, containerName); terminated != nil {
+		return true, containerExitError(pod, containerName, terminated)
+	}
+
+	return checkPodState(pod)
+}
+
+// ContainerExitError is returned when the console's container exits with a non-zero code.
+type ContainerExitError struct {
+	Pod       string
+	Container string
+	ExitCode  int32
+	Reason    string
+}
+
+func (e *ContainerExitError) Error() string {
+	msg := fmt.Sprintf("console container %s in pod %s exited with code %d", e.Container, e.Pod, e.ExitCode)
+	if e.Reason != "" {
+		msg += " (" + e.Reason + ")"
+	}
+
+	return msg
+}
+
+func terminatedState(pod *corev1.Pod, containerName string) *corev1.ContainerStateTerminated {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == containerName {
+			return status.State.Terminated
+		}
+	}
+
+	return nil
+}
+
+// containerExitError returns nil for a container that exited 0.
+func containerExitError(pod *corev1.Pod, containerName string, terminated *corev1.ContainerStateTerminated) error {
+	if terminated.ExitCode == 0 {
+		return nil
+	}
+
+	return &ContainerExitError{
+		Pod:       pod.Name,
+		Container: containerName,
+		ExitCode:  terminated.ExitCode,
+		Reason:    terminated.Reason,
+	}
+}
+
 func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Console) error {
-	pod, _, err := c.GetAttachablePod(ctx, csl)
+	pod, containerName, err := c.GetAttachablePod(ctx, csl)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
@@ -315,7 +368,7 @@ func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Cons
 		if len(items) == 0 {
 			return true, nil // pod gone, treat as success
 		}
-		return checkPodState(items[0].(*corev1.Pod))
+		return checkAttachedContainerState(items[0].(*corev1.Pod), containerName)
 	}
 
 	// Condition processes each watch event
@@ -324,7 +377,7 @@ func (c *Runner) waitForSuccess(ctx context.Context, csl *workloadsv1alpha1.Cons
 		if !ok {
 			return false, fmt.Errorf("unexpected event object: %v", reflect.TypeOf(event.Object))
 		}
-		return checkPodState(pod)
+		return checkAttachedContainerState(pod, containerName)
 	}
 
 	_, err = watchtools.UntilWithSync(ctx, lw, &corev1.Pod{}, precondition, condition)
@@ -390,12 +443,30 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 		return fmt.Errorf("could not find pod to attach to: %w", err)
 	}
 
+	// A short command can finish before we get here. Attaching to it then only leaves
+	// client-go's stdin copy writing to a closed stream once the user presses return, so
+	// show what it printed instead.
+	if terminated := terminatedState(pod, containerName); terminated != nil {
+		_, _ = fmt.Fprintf(opts.IO.ErrOut, "Console has already finished, so showing its logs instead of attaching.\n")
+		if err := c.copyLogs(ctx, pod, containerName, opts.IO); err != nil {
+			_, _ = fmt.Fprintf(opts.IO.ErrOut, "WARN: failed to copy logs from pod: %v\n", err)
+		}
+
+		return containerExitError(pod, containerName, terminated)
+	}
+
 	err = opts.Hook.AttachingToConsole(csl)
 	if err != nil {
 		return err
 	}
 
 	attacher := newAttacher(c.clientset, opts.KubeConfig, !csl.Spec.Noninteractive)
+
+	// client-go copies stdin to the container in a goroutine that outlives the attach,
+	// blocked reading the terminal. Once the console is over, the gate turns whatever it
+	// reads next into EOF, so that copy ends instead of writing to the closed stream.
+	stdin := newStdinGate(opts.IO.In)
+	defer stdin.Close()
 
 	// The attacher can hang under some circumstances. Therefore we need to run it separately, and
 	// not wait for its completion before exiting the CLI.
@@ -407,7 +478,8 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 			}
 		}()
 
-		attachErr := attacher.Attach(ctx, pod, containerName, opts.IO)
+		attachErr := attacher.Attach(ctx, pod, containerName, opts.IO, stdin)
+		stdin.Close()
 		attachErrCh <- attachErr
 	}()
 
@@ -417,6 +489,7 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 	// At this point, we deliberately don't immediately check the error, because our handling of it
 	// depends on other conditions.
 	podStatusErr := c.waitForSuccess(ctx, csl)
+	stdin.Close()
 
 	// Our pod has now completed, and we have its exit status, so we wait for either of:
 	// 1. The attach goroutine to complete.
@@ -476,6 +549,35 @@ func (c *Runner) copyLogs(ctx context.Context, pod *corev1.Pod, containerName st
 	return nil
 }
 
+// stdinGate passes reads through to the user's stdin until it's closed. A read that
+// completes after Close returns EOF and drops what it read: the console has gone, so
+// there's nowhere to send it.
+type stdinGate struct {
+	in     io.Reader
+	closed atomic.Bool
+}
+
+func newStdinGate(in io.Reader) *stdinGate {
+	return &stdinGate{in: in}
+}
+
+func (g *stdinGate) Read(p []byte) (int, error) {
+	if g.closed.Load() {
+		return 0, io.EOF
+	}
+
+	n, err := g.in.Read(p)
+	if g.closed.Load() {
+		return 0, io.EOF
+	}
+
+	return n, err
+}
+
+func (g *stdinGate) Close() {
+	g.closed.Store(true)
+}
+
 func newAttacher(clientset kubernetes.Interface, restconfig *rest.Config, isInteractive bool) *attacher {
 	return &attacher{clientset, restconfig, isInteractive}
 }
@@ -497,7 +599,9 @@ type attacher struct {
 // #27264.
 // TODO: We could consider augmenting this with a call to retrieve logs, immediately before
 // attaching.
-func (a *attacher) Attach(ctx context.Context, pod *corev1.Pod, containerName string, streams IOStreams) error {
+// stdin replaces streams.In as what's copied to the container, while the TTY still uses
+// streams.In to detect and configure the terminal.
+func (a *attacher) Attach(ctx context.Context, pod *corev1.Pod, containerName string, streams IOStreams, stdin io.Reader) error {
 	req := a.clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Namespace(pod.GetNamespace()).
@@ -531,6 +635,9 @@ func (a *attacher) Attach(ctx context.Context, pod *corev1.Pod, containerName st
 
 	if a.isInteractive {
 		streamOptions, safe = CreateInteractiveStreamOptions(streams)
+		if streams.In != nil {
+			streamOptions.Stdin = stdin
+		}
 	}
 
 	return safe(func() error { return remoteExecutor.StreamWithContext(ctx, streamOptions) })
