@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"errors"
 	"io"
 	"strings"
 
@@ -9,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilexec "k8s.io/utils/exec"
 
 	workloadsv1alpha1 "github.com/gocardless/theatre/v5/api/workloads/v1alpha1"
 )
@@ -242,6 +244,10 @@ var _ = Describe("checkAttachedContainerState", func() {
 		Expect(done).To(BeTrue())
 		Expect(err).To(Equal(&ContainerExitError{Pod: "console-pod", Container: "console", ExitCode: 2, Reason: "Error"}))
 		Expect(err).To(MatchError("console container console in pod console-pod exited with code 2 (Error)"))
+
+		var exitErr utilexec.ExitError
+		Expect(errors.As(err, &exitErr)).To(BeTrue())
+		Expect(exitErr.ExitStatus()).To(Equal(2))
 	})
 
 	It("falls back to the pod's phase", func() {

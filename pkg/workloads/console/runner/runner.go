@@ -308,6 +308,8 @@ func checkAttachedContainerState(pod *corev1.Pod, containerName string) (bool, e
 }
 
 // ContainerExitError is returned when the console's container exits with a non-zero code.
+// It implements k8s.io/utils/exec.ExitError, so a CLI can exit with the same code, as
+// kubectl does.
 type ContainerExitError struct {
 	Pod       string
 	Container string
@@ -322,6 +324,18 @@ func (e *ContainerExitError) Error() string {
 	}
 
 	return msg
+}
+
+func (e *ContainerExitError) ExitStatus() int {
+	return int(e.ExitCode)
+}
+
+func (e *ContainerExitError) Exited() bool {
+	return true
+}
+
+func (e *ContainerExitError) String() string {
+	return e.Error()
 }
 
 func terminatedState(pod *corev1.Pod, containerName string) *corev1.ContainerStateTerminated {
