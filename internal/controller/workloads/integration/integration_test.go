@@ -639,7 +639,7 @@ var _ = Describe("Console", func() {
 				Expect(drb.ObjectMeta.OwnerReferences[0].Name).To(Equal(csl.ObjectMeta.Name))
 			})
 
-			Context("When approvers-without-exec is off", func() {
+			Context("When restrict-approver-role is off", func() {
 				It("binds the approver to the creator's role", func() {
 					user, err := testEnv.AddUser(
 						envtest.User{Name: "authorising-user-2@example.com", Groups: []string{"system:masters"}},

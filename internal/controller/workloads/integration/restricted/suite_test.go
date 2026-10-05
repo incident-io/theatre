@@ -1,4 +1,4 @@
-// Package restricted runs the console controller with --approvers-without-exec
+// Package restricted runs the console controller with --restrict-approver-role
 // and --subjects-without-access set, and plain RoleBindings so the API server's
 // RBAC authoriser can answer what each subject is allowed to do.
 package restricted
@@ -112,7 +112,7 @@ var _ = BeforeSuite(func() {
 		Log:                   ctrl.Log.WithName("controllers").WithName("console"),
 		Scheme:                mgr.GetScheme(),
 		ConsoleIdBuilder:      idBuilder,
-		ApproversWithoutExec:  true,
+		RestrictApproverRole:  true,
 		SubjectsWithoutAccess: []string{authoriserUsername},
 	}).SetupWithManager(ctx, mgr)
 	Expect(err).ToNot(HaveOccurred())

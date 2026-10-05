@@ -19,7 +19,7 @@ import (
 	workloadsv1alpha1 "github.com/gocardless/theatre/v5/api/workloads/v1alpha1"
 )
 
-var _ = Describe("Console RBAC with approvers-without-exec and subjects-without-access", func() {
+var _ = Describe("Console RBAC with restrict-approver-role and subjects-without-access", func() {
 	const (
 		consoleName = "console-0"
 		approver    = "approver@example.com"

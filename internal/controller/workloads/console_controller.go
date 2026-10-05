@@ -93,7 +93,7 @@ type ConsoleReconciler struct {
 
 	// Bind approvers to a separate Role that allows attach and logs but not
 	// exec, instead of the creator's Role
-	ApproversWithoutExec bool
+	RestrictApproverRole bool
 	// Usernames that get neither the creator's nor the approvers' Role on a
 	// console, even if they created or approved it
 	SubjectsWithoutAccess []string
@@ -163,7 +163,7 @@ func (r *ConsoleReconciler) createOrUpdateUserRbac(logger logr.Logger, ctx conte
 		return errors.Wrap(err, "failed to create rolebinding for user")
 	}
 
-	if !r.ApproversWithoutExec {
+	if !r.RestrictApproverRole {
 		return nil
 	}
 
@@ -189,9 +189,9 @@ func (r *ConsoleReconciler) createOrUpdateUserRbac(logger logr.Logger, ctx conte
 }
 
 // userRbacSubjects returns the subjects to bind to the user Role and, when
-// ApproversWithoutExec is set, to the approver Role.
+// RestrictApproverRole is set, to the approver Role.
 //
-// With ApproversWithoutExec unset, approvers share the creator's Role (and so
+// With RestrictApproverRole unset, approvers share the creator's Role (and so
 // get exec), and approverSubjects is empty. Subjects whose username is listed
 // in SubjectsWithoutAccess are left out of both.
 func (r *ConsoleReconciler) userRbacSubjects(tpl *workloadsv1alpha1.ConsoleTemplate, csl *workloadsv1alpha1.Console, authorisation *workloadsv1alpha1.ConsoleAuthorisation) (userSubjects, approverSubjects []rbacv1.Subject) {
@@ -201,7 +201,7 @@ func (r *ConsoleReconciler) userRbacSubjects(tpl *workloadsv1alpha1.ConsoleTempl
 
 	approverSubjects = []rbacv1.Subject{}
 	if authorisation != nil {
-		if r.ApproversWithoutExec {
+		if r.RestrictApproverRole {
 			approverSubjects = append(approverSubjects, authorisation.Spec.Authorisations...)
 		} else {
 			userSubjects = append(userSubjects, authorisation.Spec.Authorisations...)

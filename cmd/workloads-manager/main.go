@@ -32,7 +32,7 @@ var (
 	pubsubProjectId            = app.Flag("pubsub-project-id", "ID for the project containing the Pub/Sub topic for console event publishing").Envar("PUBSUB_PROJECT_ID").String()
 	pubsubTopicId              = app.Flag("pubsub-topic-id", "ID of the topic to publish lifecycle event messages").Envar("PUBSUB_TOPIC_ID").String()
 	enableDirectoryRoleBinding = app.Flag("directory-role-binding", "Use DirectoryRoleBinding for provisioning RBAC against console objects").Envar("ENABLE_DIRECTORY_ROLE_BINDING").Default("true").Bool()
-	approversWithoutExec       = app.Flag("approvers-without-exec", "Give console approvers attach and logs but not exec, instead of the creator's permissions").Envar("APPROVERS_WITHOUT_EXEC").Default("false").Bool()
+	restrictApproverRole       = app.Flag("restrict-approver-role", "Give console approvers attach and logs but not exec, instead of the creator's permissions").Envar("RESTRICT_APPROVER_ROLE").Default("false").Bool()
 	subjectsWithoutAccess      = app.Flag("subjects-without-access", "Usernames that never get access to consoles, such as an authoriser's service account (repeatable)").Strings()
 	enableSessionRecording     = app.Flag("session-recording", "Enable session recording features").Envar("ENABLE_SESSION_RECORDING").Default("false").Bool()
 	sessionSidecarImage        = app.Flag("session-sidecar-image", "Container image to use for the session recording sidecar container").Envar("SESSION_SIDECAR_IMAGE").Default("").String()
@@ -110,7 +110,7 @@ func main() {
 		Log:                        ctrl.Log.WithName("controllers").WithName("console"),
 		Scheme:                     mgr.GetScheme(),
 		EnableDirectoryRoleBinding: *enableDirectoryRoleBinding,
-		ApproversWithoutExec:       *approversWithoutExec,
+		RestrictApproverRole:       *restrictApproverRole,
 		SubjectsWithoutAccess:      *subjectsWithoutAccess,
 		EnableSessionRecording:     *enableSessionRecording,
 		SessionSidecarImage:        *sessionSidecarImage,

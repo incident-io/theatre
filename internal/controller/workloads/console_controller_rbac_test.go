@@ -58,9 +58,9 @@ var _ = Describe("ConsoleReconciler.userRbacSubjects", func() {
 		})
 	})
 
-	Context("with ApproversWithoutExec", func() {
+	Context("with RestrictApproverRole", func() {
 		BeforeEach(func() {
-			reconciler.ApproversWithoutExec = true
+			reconciler.RestrictApproverRole = true
 		})
 
 		It("binds approvers separately from the creator", func() {
