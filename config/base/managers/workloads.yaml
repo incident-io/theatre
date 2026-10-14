@@ -68,6 +68,15 @@ rules:
       - pods/log
     verbs:
       - get
+  # Create the pause pod that holds capacity while a console waits for
+  # authorisation. This is not one of the verbs the manager copies into the
+  # roles it grants console users.
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - create
 ---
 apiVersion: v1
 kind: ServiceAccount

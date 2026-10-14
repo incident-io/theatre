@@ -108,6 +108,14 @@ type ConsoleReconciler struct {
 	SessionPubsubProjectId string
 	// The Pub/Sub topic ID that the session recording data should be sent to
 	SessionPubsubTopicId string
+
+	// Reserve a pause pod while a console waits for authorisation, so the
+	// node it will need is already there. Off unless set.
+	EnablePendingCapacity bool
+	// Pause image and PriorityClass for that pod. The class has to be lower
+	// priority than the console pod so the console pod can preempt it.
+	PendingCapacityImage         string
+	PendingCapacityPriorityClass string
 }
 
 func (r *ConsoleReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
@@ -453,12 +461,25 @@ func (r *ConsoleReconciler) Reconcile(logger logr.Logger, ctx context.Context, r
 		return ctrl.Result{}, err
 	}
 
+	// Hold or release the capacity pod after the phase is known. A failure
+	// here must not undo the status update above: the next reconcile retries
+	// the pod, and an authorised console still gets its job.
+	if err := r.reconcilePendingCapacity(ctx, logger, csl, tpl); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	var res ctrl.Result
 	switch {
 	case csl.PendingAuthorisation():
 		// Requeue for when the console has reached its before-running TTL, so that
 		// it can be deleted if it has not yet been authorised by that point.
-		res = requeueAfterInterval(logger, time.Until(*csl.GetGCTime()))
+		// While a capacity pod is being held, also wake up sooner so a pod
+		// that was deleted out from under us is created again before the TTL.
+		interval := time.Until(*csl.GetGCTime())
+		if r.EnablePendingCapacity && interval > pendingCapacityRecheck {
+			interval = pendingCapacityRecheck
+		}
+		res = requeueAfterInterval(logger, interval)
 	case csl.Pending():
 		// Requeue every second while job has been created but there is not yet a
 		// running pod: we won't receive an event via the job watcher when this
