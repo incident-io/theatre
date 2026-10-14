@@ -108,6 +108,16 @@ type ConsoleReconciler struct {
 	SessionPubsubProjectId string
 	// The Pub/Sub topic ID that the session recording data should be sent to
 	SessionPubsubTopicId string
+
+	// Reserve a Job while a console waits for authorisation, so the node it
+	// will need is already there. Off unless set.
+	EnablePendingCapacity bool
+	// PriorityClass for that Job. It has to be lower than a normal pod so the
+	// console pod can preempt it. Empty when the feature is off.
+	PendingCapacityPriorityClass string
+	// Active deadline for the Job. The console's own TTL is a separate clock.
+	// Zero uses the 15 minute default.
+	PendingCapacityTTL time.Duration
 }
 
 func (r *ConsoleReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
@@ -453,11 +463,19 @@ func (r *ConsoleReconciler) Reconcile(logger logr.Logger, ctx context.Context, r
 		return ctrl.Result{}, err
 	}
 
+	// Hold or release the capacity job after the phase is known. A failure
+	// here must not undo the status update above: the next reconcile retries
+	// the job, and an authorised console still gets its own job.
+	if err := r.reconcilePendingCapacity(ctx, logger, csl, tpl); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	var res ctrl.Result
 	switch {
 	case csl.PendingAuthorisation():
 		// Requeue for when the console has reached its before-running TTL, so that
 		// it can be deleted if it has not yet been authorised by that point.
+		// The capacity job's own deadline is enforced by the job controller.
 		res = requeueAfterInterval(logger, time.Until(*csl.GetGCTime()))
 	case csl.Pending():
 		// Requeue every second while job has been created but there is not yet a

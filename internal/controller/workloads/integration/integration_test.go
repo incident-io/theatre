@@ -639,6 +639,15 @@ var _ = Describe("Console", func() {
 				Expect(drb.ObjectMeta.OwnerReferences[0].Name).To(Equal(csl.ObjectMeta.Name))
 			})
 
+			It("does not reserve capacity while authorisation is pending", func() {
+				Consistently(func() bool {
+					err := mgr.GetClient().Get(context.TODO(), client.ObjectKey{
+						Namespace: namespaceName, Name: consoleName + "-capacity",
+					}, &corev1.Pod{})
+					return apierrors.IsNotFound(err)
+				}, 2*time.Second, 200*time.Millisecond).Should(BeTrue())
+			})
+
 			Context("When restrict-approver-role is off", func() {
 				It("binds the approver to the creator's role", func() {
 					user, err := testEnv.AddUser(
