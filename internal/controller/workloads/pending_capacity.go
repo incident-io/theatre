@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,128 +19,70 @@ import (
 )
 
 const (
-	// How often to look again while a capacity pod is held, so one that
-	// disappeared before its own deadline is replaced.
-	pendingCapacityRecheck = 30 * time.Second
-
 	// app.kubernetes.io/component value. Distinct from a real console pod so
-	// dashboards and the job-pod lookup do not treat this as the session.
+	// the job-pod lookup does not treat this as the session.
 	pendingCapacityComponent = "console-pending-capacity"
 
-	// cluster-autoscaler.kubernetes.io/safe-to-evict. Copied from the template
-	// when the template sets it: on GKE Autopilot that annotation is what puts
-	// the pod on an extended-duration node, and it stops the autoscaler
-	// evicting the placeholder to scale the node away.
+	// cluster-autoscaler.kubernetes.io/safe-to-evict. Copied when the template
+	// sets it, so the placeholder is evicted on the same terms as the console pod.
 	safeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 
-	// Set on the console once its capacity pod has lived out its TTL. The pod
-	// is gone by then, so this is what stops a later reconcile creating another
-	// while the console is still waiting.
-	pendingCapacityExpiredAnnotation = "theatre.gocardless.com/pending-capacity-expired"
-
-	// Defaults match the pause image and the existing spare-capacity
-	// PriorityClass (value -9, preemptionPolicy Never). A normal pod, priority
-	// 0, can preempt this one. This pod never preempts anything else.
-	// The TTL is measured from the pod's creation time, not the console's.
-	defaultPendingCapacityImage         = "registry.k8s.io/pause:3.10"
-	defaultPendingCapacityPriorityClass = "capacity-spare-consistent"
-	defaultPendingCapacityTTL           = 15 * time.Minute
+	// Used when the flag is enabled but the duration was left unset.
+	defaultPendingCapacityTTL = 15 * time.Minute
 )
 
-// reconcilePendingCapacity creates the placeholder while the console is
-// waiting for authorisation, and deletes it otherwise: once the job exists,
-// once the console is stopped, once the pod has lived for its own TTL, and
-// before an expired console is removed. The TTL is the pod's creation time
-// plus --pending-capacity-ttl, so a controller restart does not extend it.
-// After that deadline the pod is not created again for this console.
+// reconcilePendingCapacity creates a Job while the console is waiting for
+// authorisation, and deletes it otherwise: once the console Job exists, once
+// the console is stopped, and once the console itself expires.
 //
-// The returned duration is how soon to look again while a pod is still held.
-// Zero means there is nothing further to do for the placeholder.
-//
-// Deleting the console object itself still relies on the owner reference,
-// because a console that is already being deleted is not reconciled.
-func (r *ConsoleReconciler) reconcilePendingCapacity(ctx context.Context, logger logr.Logger, csl *workloadsv1alpha1.Console, template *workloadsv1alpha1.ConsoleTemplate) (time.Duration, error) {
+// The Job's active deadline ends the placeholder. The Job object is left in
+// place after that, so a later reconcile does not start another one while the
+// console is still waiting. Deleting the console object still relies on the
+// owner reference, because a console that is already being deleted is not
+// reconciled.
+func (r *ConsoleReconciler) reconcilePendingCapacity(ctx context.Context, logger logr.Logger, csl *workloadsv1alpha1.Console, template *workloadsv1alpha1.ConsoleTemplate) error {
 	name := types.NamespacedName{
 		Namespace: csl.Namespace,
-		Name:      pendingCapacityPodName(csl.Name),
+		Name:      pendingCapacityJobName(csl.Name),
 	}
-	expired := csl.Annotations[pendingCapacityExpiredAnnotation] == "true"
-	hold := r.EnablePendingCapacity && csl.PendingAuthorisation() && !csl.EligibleForGC() && !expired
+	hold := r.EnablePendingCapacity && csl.PendingAuthorisation() && !csl.EligibleForGC()
 	if !hold {
-		return 0, r.deletePendingCapacityPod(ctx, logger, name)
+		return r.deletePendingCapacityJob(ctx, logger, name)
 	}
 
-	pod := r.buildPendingCapacityPod(name, csl, template)
-	if err := controllerutil.SetControllerReference(csl, pod, r.Scheme); err != nil {
-		return 0, errors.Wrap(err, "failed to set owner on pending capacity pod")
-	}
-
-	existing := &corev1.Pod{}
-	err := r.Get(ctx, name, existing)
-	if apierrors.IsNotFound(err) {
-		if err := r.Create(ctx, pod); err != nil {
-			return 0, errors.Wrap(err, "failed to create pending capacity pod")
-		}
-		logger.Info("Created pending capacity pod", "event", EventSuccessfulCreate, "kind", "pod", "pod", pod.Name)
-		return r.pendingCapacityRemaining(pod.CreationTimestamp), nil
-	}
+	job, err := r.buildPendingCapacityJob(name, csl, template)
 	if err != nil {
-		return 0, errors.Wrap(err, "failed to get pending capacity pod")
+		return err
 	}
-	if !metav1.IsControlledBy(existing, csl) {
-		return 0, errors.Errorf("pending capacity pod %s is not owned by this console", name)
+	if err := controllerutil.SetControllerReference(csl, job, r.Scheme); err != nil {
+		return errors.Wrap(err, "failed to set owner on pending capacity job")
 	}
 
-	remaining := r.pendingCapacityRemaining(existing.CreationTimestamp)
-	if remaining <= 0 {
-		// Record the deadline before deleting. A restart after the delete,
-		// with no pod left to read a creation time from, must not create
-		// another one.
-		if err := r.markPendingCapacityExpired(ctx, csl); err != nil {
-			return 0, err
+	existing := &batchv1.Job{}
+	err = r.Get(ctx, name, existing)
+	if apierrors.IsNotFound(err) {
+		if err := r.Create(ctx, job); err != nil {
+			return errors.Wrap(err, "failed to create pending capacity job")
 		}
-		if err := r.deletePendingCapacityPod(ctx, logger, name); err != nil {
-			return 0, err
-		}
-		logger.Info("Pending capacity pod reached its TTL", "event", EventDelete, "kind", "pod", "pod", name.Name)
-		return 0, nil
-	}
-	// Pod specs are immutable, and a console does not change shape while it
-	// waits. Leave the pod that is already held, and wake up when its TTL ends.
-	return remaining, nil
-}
-
-// pendingCapacityRemaining is the time left until created + TTL. A zero
-// creation time (the apiserver has not filled it in) waits the full TTL.
-func (r *ConsoleReconciler) pendingCapacityRemaining(created metav1.Time) time.Duration {
-	if created.IsZero() {
-		return r.pendingCapacityTTL()
-	}
-	return time.Until(created.Add(r.pendingCapacityTTL()))
-}
-
-func (r *ConsoleReconciler) markPendingCapacityExpired(ctx context.Context, csl *workloadsv1alpha1.Console) error {
-	if csl.Annotations[pendingCapacityExpiredAnnotation] == "true" {
+		logger.Info("Created pending capacity job", "event", EventSuccessfulCreate, "kind", "job", "job", job.Name)
 		return nil
 	}
-	original := csl.DeepCopy()
-	annotations := make(map[string]string, len(csl.GetAnnotations())+1)
-	for k, v := range csl.GetAnnotations() {
-		annotations[k] = v
+	if err != nil {
+		return errors.Wrap(err, "failed to get pending capacity job")
 	}
-	annotations[pendingCapacityExpiredAnnotation] = "true"
-	csl.SetAnnotations(annotations)
-	if err := r.Patch(ctx, csl, client.MergeFrom(original)); err != nil {
-		return errors.Wrap(err, "failed to record that the pending capacity pod expired")
+	if !metav1.IsControlledBy(existing, csl) {
+		return errors.Errorf("pending capacity job %s is not owned by this console", name)
 	}
+	// A finished job still occupies the name. Leave it, so the deadline is not
+	// restarted by creating another.
 	return nil
 }
 
-func (r *ConsoleReconciler) deletePendingCapacityPod(ctx context.Context, logger logr.Logger, name types.NamespacedName) error {
+func (r *ConsoleReconciler) deletePendingCapacityJob(ctx context.Context, logger logr.Logger, name types.NamespacedName) error {
 	grace := int64(0)
 	policy := metav1.DeletePropagationBackground
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: name.Namespace, Name: name.Name}}
-	err := r.Delete(ctx, pod, &client.DeleteOptions{
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: name.Namespace, Name: name.Name}}
+	err := r.Delete(ctx, job, &client.DeleteOptions{
 		GracePeriodSeconds: &grace,
 		PropagationPolicy:  &policy,
 	})
@@ -147,70 +90,81 @@ func (r *ConsoleReconciler) deletePendingCapacityPod(ctx context.Context, logger
 		return nil
 	}
 	if err != nil {
-		return errors.Wrap(err, "failed to delete pending capacity pod")
+		return errors.Wrap(err, "failed to delete pending capacity job")
 	}
-	logger.Info("Deleted pending capacity pod", "event", EventDelete, "kind", "pod", "pod", name.Name)
+	logger.Info("Deleted pending capacity job", "event", EventDelete, "kind", "job", "job", name.Name)
 	return nil
 }
 
-func (r *ConsoleReconciler) buildPendingCapacityPod(name types.NamespacedName, csl *workloadsv1alpha1.Console, template *workloadsv1alpha1.ConsoleTemplate) *corev1.Pod {
+func (r *ConsoleReconciler) buildPendingCapacityJob(name types.NamespacedName, csl *workloadsv1alpha1.Console, template *workloadsv1alpha1.ConsoleTemplate) (*batchv1.Job, error) {
 	spec := template.Spec.Template.Spec.DeepCopy()
+	if len(spec.Containers) == 0 || spec.Containers[0].Image == "" {
+		return nil, errors.New("console template has no image for the pending capacity job")
+	}
 	// The session sidecar is part of the pod that will actually run, so the
-	// placeholder has to reserve its resources too.
+	// placeholder has to reserve its resources too. The image that is pulled
+	// is still the template's own image.
 	if r.EnableSessionRecording {
 		spec.Containers = append(spec.Containers, r.buildSidecarContainer(r.ConsoleIdBuilder.BuildId(csl)))
 	}
 
+	deadline := int64(r.pendingCapacityTTL().Seconds())
+	backoff := int32(10)
+	completions := int32(1)
+	parallelism := int32(1)
 	grace := int64(0)
 	automount := false
-	pod := &corev1.Pod{
+	labels := map[string]string{
+		"app.kubernetes.io/component": pendingCapacityComponent,
+		"console-name":                sanitiseLabel(csl.Name),
+	}
+	podLabels := copyStringMap(labels)
+	resources := corev1.ResourceRequirements{
+		Requests: effectiveResources(spec, false),
+		Limits:   effectiveResources(spec, true),
+	}
+
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name.Name,
 			Namespace: name.Namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/component": pendingCapacityComponent,
-				"console-name":                sanitiseLabel(csl.Name),
-			},
+			Labels:    labels,
 		},
-		Spec: corev1.PodSpec{
-			// Not the console service account: that account is the workload's
-			// identity, and this pod only has to sit on a node.
-			AutomountServiceAccountToken:  &automount,
-			PriorityClassName:             r.pendingCapacityPriorityClass(),
-			TerminationGracePeriodSeconds: &grace,
-			RestartPolicy:                 corev1.RestartPolicyAlways,
-			NodeSelector:                  copyStringMap(spec.NodeSelector),
-			Tolerations:                   spec.Tolerations,
-			Affinity:                      spec.Affinity,
-			Containers: []corev1.Container{{
-				Name:            "pause",
-				Image:           r.pendingCapacityImage(),
-				ImagePullPolicy: corev1.PullIfNotPresent,
-				Resources: corev1.ResourceRequirements{
-					Requests: effectiveResources(spec, false),
-					Limits:   effectiveResources(spec, true),
+		Spec: batchv1.JobSpec{
+			ActiveDeadlineSeconds: &deadline,
+			// A preempted pod can be replaced. The deadline is counted from
+			// when the job started, so a replacement does not extend it.
+			BackoffLimit: &backoff,
+			Completions:  &completions,
+			Parallelism:  &parallelism,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
+				Spec: corev1.PodSpec{
+					// Not the console service account: that account is the
+					// workload's identity, and this pod only has to sit on a node.
+					AutomountServiceAccountToken:  &automount,
+					PriorityClassName:             r.PendingCapacityPriorityClass,
+					TerminationGracePeriodSeconds: &grace,
+					RestartPolicy:                 corev1.RestartPolicyNever,
+					NodeSelector:                  copyStringMap(spec.NodeSelector),
+					Tolerations:                   spec.Tolerations,
+					Affinity:                      spec.Affinity,
+					Containers: []corev1.Container{{
+						Name:            "sleep",
+						Image:           spec.Containers[0].Image,
+						ImagePullPolicy: corev1.PullIfNotPresent,
+						Command:         []string{"sleep"},
+						Args:            []string{fmt.Sprintf("%d", deadline)},
+						Resources:       resources,
+					}},
 				},
-			}},
+			},
 		},
 	}
 	if v, ok := template.Spec.Template.Annotations[safeToEvictAnnotation]; ok {
-		pod.Annotations = map[string]string{safeToEvictAnnotation: v}
+		job.Spec.Template.Annotations = map[string]string{safeToEvictAnnotation: v}
 	}
-	return pod
-}
-
-func (r *ConsoleReconciler) pendingCapacityImage() string {
-	if r.PendingCapacityImage != "" {
-		return r.PendingCapacityImage
-	}
-	return defaultPendingCapacityImage
-}
-
-func (r *ConsoleReconciler) pendingCapacityPriorityClass() string {
-	if r.PendingCapacityPriorityClass != "" {
-		return r.PendingCapacityPriorityClass
-	}
-	return defaultPendingCapacityPriorityClass
+	return job, nil
 }
 
 func (r *ConsoleReconciler) pendingCapacityTTL() time.Duration {
@@ -220,9 +174,10 @@ func (r *ConsoleReconciler) pendingCapacityTTL() time.Duration {
 	return defaultPendingCapacityTTL
 }
 
-// pendingCapacityPodName keeps the pod name inside the 63 character label
-// limit, same constraint as the console job name.
-func pendingCapacityPodName(consoleName string) string {
+// pendingCapacityJobName keeps the job name inside the 63 character label
+// limit. The suffix differs from the console job, so its pods are not
+// mistaken for the session.
+func pendingCapacityJobName(consoleName string) string {
 	return fmt.Sprintf("%s-capacity", truncateString(consoleName, 54))
 }
 

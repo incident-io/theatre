@@ -35,10 +35,9 @@ var (
 	restrictApproverRole         = app.Flag("restrict-approver-role", "Give console approvers attach and logs but not exec, instead of the creator's permissions").Envar("RESTRICT_APPROVER_ROLE").Default("false").Bool()
 	subjectsWithoutAccess        = app.Flag("subjects-without-access", "Usernames that never get access to consoles, such as an authoriser's service account (repeatable)").Strings()
 	enableSessionRecording       = app.Flag("session-recording", "Enable session recording features").Envar("ENABLE_SESSION_RECORDING").Default("false").Bool()
-	enablePendingCapacity        = app.Flag("pending-capacity", "Reserve a low-priority pause pod while a console waits for authorisation").Envar("ENABLE_PENDING_CAPACITY").Default("false").Bool()
-	pendingCapacityImage         = app.Flag("pending-capacity-image", "Pause image for the pending-authorisation capacity pod").Envar("PENDING_CAPACITY_IMAGE").Default("registry.k8s.io/pause:3.10").String()
-	pendingCapacityPriorityClass = app.Flag("pending-capacity-priority-class", "PriorityClass for the pending-authorisation capacity pod; must be preemptible by a normal pod").Envar("PENDING_CAPACITY_PRIORITY_CLASS").Default("capacity-spare-consistent").String()
-	pendingCapacityTTL           = app.Flag("pending-capacity-ttl", "Delete the pending-authorisation capacity pod this long after it is created, and do not create another while that console stays pending").Envar("PENDING_CAPACITY_TTL").Default("15m").Duration()
+	enablePendingCapacity        = app.Flag("pending-capacity", "Reserve a low-priority Job while a console waits for authorisation").Envar("ENABLE_PENDING_CAPACITY").Default("false").Bool()
+	pendingCapacityPriorityClass = app.Flag("pending-capacity-priority-class", "PriorityClass for the pending-authorisation capacity Job; must be preemptible by a normal pod").Envar("PENDING_CAPACITY_PRIORITY_CLASS").String()
+	pendingCapacityTTL           = app.Flag("pending-capacity-ttl", "Active deadline for the pending-authorisation capacity Job").Envar("PENDING_CAPACITY_TTL").Default("15m").Duration()
 	sessionSidecarImage          = app.Flag("session-sidecar-image", "Container image to use for the session recording sidecar container").Envar("SESSION_SIDECAR_IMAGE").Default("").String()
 	sessionPubsubProjectId       = app.Flag("session-pubsub-project-id", "ID for the project containing the Pub/Sub topic for session recording").Envar("SESSION_PUBSUB_PROJECT_ID").Default("").String()
 	sessionPubsubTopicId         = app.Flag("session-pubsub-topic-id", "ID of the topic to publish session recording data to").Envar("SESSION_PUBSUB_TOPIC_ID").Default("").String()
@@ -74,8 +73,8 @@ func main() {
 			app.Fatalf("Session recording Google pubsub ID must be set")
 		}
 	}
-	if *enablePendingCapacity && (*pendingCapacityImage == "" || *pendingCapacityPriorityClass == "" || *pendingCapacityTTL <= 0) {
-		app.Fatalf("pending capacity requires an image, a priority class, and a positive ttl")
+	if *enablePendingCapacity && (*pendingCapacityPriorityClass == "" || *pendingCapacityTTL <= 0) {
+		app.Fatalf("pending capacity requires a priority class and a positive ttl")
 	}
 
 	// Create publisher sink for console lifecycle events
@@ -124,7 +123,6 @@ func main() {
 		SessionPubsubProjectId:       *sessionPubsubProjectId,
 		SessionPubsubTopicId:         *sessionPubsubTopicId,
 		EnablePendingCapacity:        *enablePendingCapacity,
-		PendingCapacityImage:         *pendingCapacityImage,
 		PendingCapacityPriorityClass: *pendingCapacityPriorityClass,
 		PendingCapacityTTL:           *pendingCapacityTTL,
 	}).SetupWithManager(ctx, mgr); err != nil {
