@@ -318,3 +318,27 @@ var _ = Describe("stdinGate", func() {
 		Expect(err).To(Equal(io.EOF))
 	})
 })
+
+var _ = Describe("shouldShowFinishedLogs", func() {
+	It("shows the tail when the container finished and attach showed nothing", func() {
+		Expect(shouldShowFinishedLogs(nil, 0, true)).To(BeTrue())
+	})
+
+	It("leaves a session that already showed output and then exited", func() {
+		Expect(shouldShowFinishedLogs(nil, 20, true)).To(BeFalse())
+	})
+
+	It("shows the tail when the attach stream was already closed", func() {
+		err := errors.New(`write on closed stream 0`)
+		Expect(shouldShowFinishedLogs(err, 20, true)).To(BeTrue())
+		Expect(shouldShowFinishedLogs(err, 0, false)).To(BeTrue())
+	})
+
+	It("shows the tail on a broken pipe", func() {
+		Expect(shouldShowFinishedLogs(errors.New("write: broken pipe"), 4, false)).To(BeTrue())
+	})
+
+	It("does not show the tail for an unrelated attach error while the container is running", func() {
+		Expect(shouldShowFinishedLogs(errors.New("dial tcp: connection refused"), 0, false)).To(BeFalse())
+	})
+})
