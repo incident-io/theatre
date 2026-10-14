@@ -117,7 +117,7 @@ type ConsoleReconciler struct {
 	PendingCapacityImage         string
 	PendingCapacityPriorityClass string
 	// How long the pause pod may live after its creation time. The console's
-	// own TTL is a separate clock. Zero uses DefaultPendingCapacityTTL.
+	// own TTL is a separate clock. Zero uses the 15 minute default.
 	PendingCapacityTTL time.Duration
 }
 

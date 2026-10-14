@@ -35,15 +35,15 @@ const (
 	// Set on the console once its capacity pod has lived out its TTL. The pod
 	// is gone by then, so this is what stops a later reconcile creating another
 	// while the console is still waiting.
-	PendingCapacityExpiredAnnotation = "theatre.gocardless.com/pending-capacity-expired"
+	pendingCapacityExpiredAnnotation = "theatre.gocardless.com/pending-capacity-expired"
 
 	// Defaults match the pause image and the existing spare-capacity
 	// PriorityClass (value -9, preemptionPolicy Never). A normal pod, priority
 	// 0, can preempt this one. This pod never preempts anything else.
 	// The TTL is measured from the pod's creation time, not the console's.
-	DefaultPendingCapacityImage         = "registry.k8s.io/pause:3.10"
-	DefaultPendingCapacityPriorityClass = "capacity-spare-consistent"
-	DefaultPendingCapacityTTL           = 15 * time.Minute
+	defaultPendingCapacityImage         = "registry.k8s.io/pause:3.10"
+	defaultPendingCapacityPriorityClass = "capacity-spare-consistent"
+	defaultPendingCapacityTTL           = 15 * time.Minute
 )
 
 // reconcilePendingCapacity creates the placeholder while the console is
@@ -63,7 +63,7 @@ func (r *ConsoleReconciler) reconcilePendingCapacity(ctx context.Context, logger
 		Namespace: csl.Namespace,
 		Name:      pendingCapacityPodName(csl.Name),
 	}
-	expired := csl.Annotations[PendingCapacityExpiredAnnotation] == "true"
+	expired := csl.Annotations[pendingCapacityExpiredAnnotation] == "true"
 	hold := r.EnablePendingCapacity && csl.PendingAuthorisation() && !csl.EligibleForGC() && !expired
 	if !hold {
 		return 0, r.deletePendingCapacityPod(ctx, logger, name)
@@ -119,7 +119,7 @@ func (r *ConsoleReconciler) pendingCapacityRemaining(created metav1.Time) time.D
 }
 
 func (r *ConsoleReconciler) markPendingCapacityExpired(ctx context.Context, csl *workloadsv1alpha1.Console) error {
-	if csl.Annotations[PendingCapacityExpiredAnnotation] == "true" {
+	if csl.Annotations[pendingCapacityExpiredAnnotation] == "true" {
 		return nil
 	}
 	original := csl.DeepCopy()
@@ -127,7 +127,7 @@ func (r *ConsoleReconciler) markPendingCapacityExpired(ctx context.Context, csl 
 	for k, v := range csl.GetAnnotations() {
 		annotations[k] = v
 	}
-	annotations[PendingCapacityExpiredAnnotation] = "true"
+	annotations[pendingCapacityExpiredAnnotation] = "true"
 	csl.SetAnnotations(annotations)
 	if err := r.Patch(ctx, csl, client.MergeFrom(original)); err != nil {
 		return errors.Wrap(err, "failed to record that the pending capacity pod expired")
@@ -203,21 +203,21 @@ func (r *ConsoleReconciler) pendingCapacityImage() string {
 	if r.PendingCapacityImage != "" {
 		return r.PendingCapacityImage
 	}
-	return DefaultPendingCapacityImage
+	return defaultPendingCapacityImage
 }
 
 func (r *ConsoleReconciler) pendingCapacityPriorityClass() string {
 	if r.PendingCapacityPriorityClass != "" {
 		return r.PendingCapacityPriorityClass
 	}
-	return DefaultPendingCapacityPriorityClass
+	return defaultPendingCapacityPriorityClass
 }
 
 func (r *ConsoleReconciler) pendingCapacityTTL() time.Duration {
 	if r.PendingCapacityTTL > 0 {
 		return r.PendingCapacityTTL
 	}
-	return DefaultPendingCapacityTTL
+	return defaultPendingCapacityTTL
 }
 
 // pendingCapacityPodName keeps the pod name inside the 63 character label
