@@ -307,6 +307,72 @@ var _ = Describe("Pending capacity pod", func() {
 		}).Should(BeTrue())
 	})
 
+	It("deletes the pause pod when its own TTL elapses and leaves the console waiting", func() {
+		reconciler.PendingCapacityTTL = 3 * time.Second
+		DeferCleanup(func() { reconciler.PendingCapacityTTL = 0 })
+
+		create()
+		pod := capacityPod()
+		Expect(pod.CreationTimestamp.IsZero()).To(BeFalse())
+
+		By("Expect the pause pod to be removed from its creation time, not the console TTL")
+		Eventually(func() bool {
+			err := mgr.GetClient().Get(context.TODO(), podKey(), &corev1.Pod{})
+			return apierrors.IsNotFound(err)
+		}).Should(BeTrue())
+
+		updated := &workloadsv1alpha1.Console{}
+		Expect(mgr.GetClient().Get(context.TODO(), client.ObjectKeyFromObject(csl), updated)).To(Succeed())
+		Expect(updated.Status.Phase).To(Equal(workloadsv1alpha1.ConsolePendingAuthorisation))
+		Expect(updated.Annotations).To(HaveKeyWithValue(consolecontroller.PendingCapacityExpiredAnnotation, "true"))
+		Expect(updated.Spec.TTLSecondsBeforeRunning).NotTo(BeNil())
+		Expect(*updated.Spec.TTLSecondsBeforeRunning).To(Equal(int32(3600)))
+	})
+
+	It("does not recreate the pause pod after that TTL while the console stays pending", func() {
+		reconciler.PendingCapacityTTL = 3 * time.Second
+		DeferCleanup(func() { reconciler.PendingCapacityTTL = 0 })
+
+		create()
+		Expect(capacityPod()).NotTo(BeNil())
+
+		Eventually(func() bool {
+			err := mgr.GetClient().Get(context.TODO(), podKey(), &corev1.Pod{})
+			if !apierrors.IsNotFound(err) {
+				return false
+			}
+			updated := &workloadsv1alpha1.Console{}
+			if err := mgr.GetClient().Get(context.TODO(), client.ObjectKeyFromObject(csl), updated); err != nil {
+				return false
+			}
+			return updated.Annotations[consolecontroller.PendingCapacityExpiredAnnotation] == "true"
+		}).Should(BeTrue())
+
+		By("Ask the controller to reconcile again, the way any console update would")
+		Eventually(func() error {
+			fresh := &workloadsv1alpha1.Console{}
+			if err := mgr.GetClient().Get(context.TODO(), client.ObjectKeyFromObject(csl), fresh); err != nil {
+				return err
+			}
+			base := fresh.DeepCopy()
+			if fresh.Labels == nil {
+				fresh.Labels = map[string]string{}
+			}
+			fresh.Labels["capacity-recheck"] = "again"
+			return mgr.GetClient().Patch(context.TODO(), fresh, client.MergeFrom(base))
+		}).Should(Succeed())
+
+		Consistently(func() bool {
+			err := mgr.GetClient().Get(context.TODO(), podKey(), &corev1.Pod{})
+			return apierrors.IsNotFound(err)
+		}, 3*time.Second, 200*time.Millisecond).Should(BeTrue())
+
+		updated := &workloadsv1alpha1.Console{}
+		Expect(mgr.GetClient().Get(context.TODO(), client.ObjectKeyFromObject(csl), updated)).To(Succeed())
+		Expect(updated.Status.Phase).To(Equal(workloadsv1alpha1.ConsolePendingAuthorisation))
+		Expect(*updated.Spec.TTLSecondsBeforeRunning).To(Equal(int32(3600)))
+	})
+
 	It("does not create a pause pod when the console does not need authorisation", func() {
 		template.Spec.DefaultAuthorisationRule = nil
 		create()

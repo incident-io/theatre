@@ -19,7 +19,7 @@ import (
 
 const (
 	// How often to look again while a capacity pod is held, so one that
-	// disappeared is replaced before the console's before-running TTL.
+	// disappeared before its own deadline is replaced.
 	pendingCapacityRecheck = 30 * time.Second
 
 	// app.kubernetes.io/component value. Distinct from a real console pod so
@@ -32,50 +32,106 @@ const (
 	// evicting the placeholder to scale the node away.
 	safeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 
+	// Set on the console once its capacity pod has lived out its TTL. The pod
+	// is gone by then, so this is what stops a later reconcile creating another
+	// while the console is still waiting.
+	PendingCapacityExpiredAnnotation = "theatre.gocardless.com/pending-capacity-expired"
+
 	// Defaults match the pause image and the existing spare-capacity
 	// PriorityClass (value -9, preemptionPolicy Never). A normal pod, priority
 	// 0, can preempt this one. This pod never preempts anything else.
+	// The TTL is measured from the pod's creation time, not the console's.
 	DefaultPendingCapacityImage         = "registry.k8s.io/pause:3.10"
 	DefaultPendingCapacityPriorityClass = "capacity-spare-consistent"
+	DefaultPendingCapacityTTL           = 15 * time.Minute
 )
 
 // reconcilePendingCapacity creates the placeholder while the console is
 // waiting for authorisation, and deletes it otherwise: once the job exists,
-// once the console is stopped, and before an expired console is removed.
+// once the console is stopped, once the pod has lived for its own TTL, and
+// before an expired console is removed. The TTL is the pod's creation time
+// plus --pending-capacity-ttl, so a controller restart does not extend it.
+// After that deadline the pod is not created again for this console.
+//
+// The returned duration is how soon to look again while a pod is still held.
+// Zero means there is nothing further to do for the placeholder.
+//
 // Deleting the console object itself still relies on the owner reference,
 // because a console that is already being deleted is not reconciled.
-func (r *ConsoleReconciler) reconcilePendingCapacity(ctx context.Context, logger logr.Logger, csl *workloadsv1alpha1.Console, template *workloadsv1alpha1.ConsoleTemplate) error {
+func (r *ConsoleReconciler) reconcilePendingCapacity(ctx context.Context, logger logr.Logger, csl *workloadsv1alpha1.Console, template *workloadsv1alpha1.ConsoleTemplate) (time.Duration, error) {
 	name := types.NamespacedName{
 		Namespace: csl.Namespace,
 		Name:      pendingCapacityPodName(csl.Name),
 	}
-	hold := r.EnablePendingCapacity && csl.PendingAuthorisation() && !csl.EligibleForGC()
+	expired := csl.Annotations[PendingCapacityExpiredAnnotation] == "true"
+	hold := r.EnablePendingCapacity && csl.PendingAuthorisation() && !csl.EligibleForGC() && !expired
 	if !hold {
-		return r.deletePendingCapacityPod(ctx, logger, name)
+		return 0, r.deletePendingCapacityPod(ctx, logger, name)
 	}
 
 	pod := r.buildPendingCapacityPod(name, csl, template)
 	if err := controllerutil.SetControllerReference(csl, pod, r.Scheme); err != nil {
-		return errors.Wrap(err, "failed to set owner on pending capacity pod")
+		return 0, errors.Wrap(err, "failed to set owner on pending capacity pod")
 	}
 
 	existing := &corev1.Pod{}
 	err := r.Get(ctx, name, existing)
 	if apierrors.IsNotFound(err) {
 		if err := r.Create(ctx, pod); err != nil {
-			return errors.Wrap(err, "failed to create pending capacity pod")
+			return 0, errors.Wrap(err, "failed to create pending capacity pod")
 		}
 		logger.Info("Created pending capacity pod", "event", EventSuccessfulCreate, "kind", "pod", "pod", pod.Name)
-		return nil
+		return r.pendingCapacityRemaining(pod.CreationTimestamp), nil
 	}
 	if err != nil {
-		return errors.Wrap(err, "failed to get pending capacity pod")
+		return 0, errors.Wrap(err, "failed to get pending capacity pod")
 	}
 	if !metav1.IsControlledBy(existing, csl) {
-		return errors.Errorf("pending capacity pod %s is not owned by this console", name)
+		return 0, errors.Errorf("pending capacity pod %s is not owned by this console", name)
+	}
+
+	remaining := r.pendingCapacityRemaining(existing.CreationTimestamp)
+	if remaining <= 0 {
+		// Record the deadline before deleting. A restart after the delete,
+		// with no pod left to read a creation time from, must not create
+		// another one.
+		if err := r.markPendingCapacityExpired(ctx, csl); err != nil {
+			return 0, err
+		}
+		if err := r.deletePendingCapacityPod(ctx, logger, name); err != nil {
+			return 0, err
+		}
+		logger.Info("Pending capacity pod reached its TTL", "event", EventDelete, "kind", "pod", "pod", name.Name)
+		return 0, nil
 	}
 	// Pod specs are immutable, and a console does not change shape while it
-	// waits. Leave the pod that is already held.
+	// waits. Leave the pod that is already held, and wake up when its TTL ends.
+	return remaining, nil
+}
+
+// pendingCapacityRemaining is the time left until created + TTL. A zero
+// creation time (the apiserver has not filled it in) waits the full TTL.
+func (r *ConsoleReconciler) pendingCapacityRemaining(created metav1.Time) time.Duration {
+	if created.IsZero() {
+		return r.pendingCapacityTTL()
+	}
+	return time.Until(created.Add(r.pendingCapacityTTL()))
+}
+
+func (r *ConsoleReconciler) markPendingCapacityExpired(ctx context.Context, csl *workloadsv1alpha1.Console) error {
+	if csl.Annotations[PendingCapacityExpiredAnnotation] == "true" {
+		return nil
+	}
+	original := csl.DeepCopy()
+	annotations := make(map[string]string, len(csl.GetAnnotations())+1)
+	for k, v := range csl.GetAnnotations() {
+		annotations[k] = v
+	}
+	annotations[PendingCapacityExpiredAnnotation] = "true"
+	csl.SetAnnotations(annotations)
+	if err := r.Patch(ctx, csl, client.MergeFrom(original)); err != nil {
+		return errors.Wrap(err, "failed to record that the pending capacity pod expired")
+	}
 	return nil
 }
 
@@ -155,6 +211,13 @@ func (r *ConsoleReconciler) pendingCapacityPriorityClass() string {
 		return r.PendingCapacityPriorityClass
 	}
 	return DefaultPendingCapacityPriorityClass
+}
+
+func (r *ConsoleReconciler) pendingCapacityTTL() time.Duration {
+	if r.PendingCapacityTTL > 0 {
+		return r.PendingCapacityTTL
+	}
+	return DefaultPendingCapacityTTL
 }
 
 // pendingCapacityPodName keeps the pod name inside the 63 character label

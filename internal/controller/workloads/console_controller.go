@@ -116,6 +116,9 @@ type ConsoleReconciler struct {
 	// priority than the console pod so the console pod can preempt it.
 	PendingCapacityImage         string
 	PendingCapacityPriorityClass string
+	// How long the pause pod may live after its creation time. The console's
+	// own TTL is a separate clock. Zero uses DefaultPendingCapacityTTL.
+	PendingCapacityTTL time.Duration
 }
 
 func (r *ConsoleReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
@@ -464,7 +467,10 @@ func (r *ConsoleReconciler) Reconcile(logger logr.Logger, ctx context.Context, r
 	// Hold or release the capacity pod after the phase is known. A failure
 	// here must not undo the status update above: the next reconcile retries
 	// the pod, and an authorised console still gets its job.
-	if err := r.reconcilePendingCapacity(ctx, logger, csl, tpl); err != nil {
+	// capacityAfter is how soon that pod's own deadline falls. Zero means it
+	// is not being held.
+	capacityAfter, err := r.reconcilePendingCapacity(ctx, logger, csl, tpl)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -473,10 +479,14 @@ func (r *ConsoleReconciler) Reconcile(logger logr.Logger, ctx context.Context, r
 	case csl.PendingAuthorisation():
 		// Requeue for when the console has reached its before-running TTL, so that
 		// it can be deleted if it has not yet been authorised by that point.
-		// While a capacity pod is being held, also wake up sooner so a pod
-		// that was deleted out from under us is created again before the TTL.
+		// While a capacity pod is held, wake at its creation-time deadline so
+		// it is removed on time, and at least every 30s so one that disappeared
+		// early is replaced. After that deadline there is nothing to replace.
 		interval := time.Until(*csl.GetGCTime())
-		if r.EnablePendingCapacity && interval > pendingCapacityRecheck {
+		if capacityAfter > 0 && capacityAfter < interval {
+			interval = capacityAfter
+		}
+		if capacityAfter > 0 && interval > pendingCapacityRecheck {
 			interval = pendingCapacityRecheck
 		}
 		res = requeueAfterInterval(logger, interval)

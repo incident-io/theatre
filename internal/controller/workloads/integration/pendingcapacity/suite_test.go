@@ -28,10 +28,11 @@ import (
 )
 
 var (
-	mgr     ctrl.Manager
-	testEnv *envtest.Environment
-	ctx     context.Context
-	cancel  context.CancelFunc
+	mgr        ctrl.Manager
+	reconciler *consolecontroller.ConsoleReconciler
+	testEnv    *envtest.Environment
+	ctx        context.Context
+	cancel     context.CancelFunc
 )
 
 func TestSuite(t *testing.T) {
@@ -104,7 +105,7 @@ var _ = BeforeSuite(func() {
 		),
 	})
 
-	err = (&consolecontroller.ConsoleReconciler{
+	reconciler = &consolecontroller.ConsoleReconciler{
 		Client:                       mgr.GetClient(),
 		LifecycleRecorder:            lifecycleRecorder,
 		Log:                          ctrl.Log.WithName("controllers").WithName("console"),
@@ -113,7 +114,8 @@ var _ = BeforeSuite(func() {
 		EnablePendingCapacity:        true,
 		PendingCapacityImage:         consolecontroller.DefaultPendingCapacityImage,
 		PendingCapacityPriorityClass: consolecontroller.DefaultPendingCapacityPriorityClass,
-	}).SetupWithManager(ctx, mgr)
+	}
+	err = reconciler.SetupWithManager(ctx, mgr)
 	Expect(err).ToNot(HaveOccurred())
 
 	go func() {

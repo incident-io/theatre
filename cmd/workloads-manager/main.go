@@ -38,6 +38,7 @@ var (
 	enablePendingCapacity        = app.Flag("pending-capacity", "Reserve a low-priority pause pod while a console waits for authorisation").Envar("ENABLE_PENDING_CAPACITY").Default("false").Bool()
 	pendingCapacityImage         = app.Flag("pending-capacity-image", "Pause image for the pending-authorisation capacity pod").Envar("PENDING_CAPACITY_IMAGE").Default("registry.k8s.io/pause:3.10").String()
 	pendingCapacityPriorityClass = app.Flag("pending-capacity-priority-class", "PriorityClass for the pending-authorisation capacity pod; must be preemptible by a normal pod").Envar("PENDING_CAPACITY_PRIORITY_CLASS").Default("capacity-spare-consistent").String()
+	pendingCapacityTTL           = app.Flag("pending-capacity-ttl", "Delete the pending-authorisation capacity pod this long after it is created, and do not create another while that console stays pending").Envar("PENDING_CAPACITY_TTL").Default("15m").Duration()
 	sessionSidecarImage          = app.Flag("session-sidecar-image", "Container image to use for the session recording sidecar container").Envar("SESSION_SIDECAR_IMAGE").Default("").String()
 	sessionPubsubProjectId       = app.Flag("session-pubsub-project-id", "ID for the project containing the Pub/Sub topic for session recording").Envar("SESSION_PUBSUB_PROJECT_ID").Default("").String()
 	sessionPubsubTopicId         = app.Flag("session-pubsub-topic-id", "ID of the topic to publish session recording data to").Envar("SESSION_PUBSUB_TOPIC_ID").Default("").String()
@@ -73,8 +74,8 @@ func main() {
 			app.Fatalf("Session recording Google pubsub ID must be set")
 		}
 	}
-	if *enablePendingCapacity && (*pendingCapacityImage == "" || *pendingCapacityPriorityClass == "") {
-		app.Fatalf("pending capacity requires an image and a priority class")
+	if *enablePendingCapacity && (*pendingCapacityImage == "" || *pendingCapacityPriorityClass == "" || *pendingCapacityTTL <= 0) {
+		app.Fatalf("pending capacity requires an image, a priority class, and a positive ttl")
 	}
 
 	// Create publisher sink for console lifecycle events
@@ -125,6 +126,7 @@ func main() {
 		EnablePendingCapacity:        *enablePendingCapacity,
 		PendingCapacityImage:         *pendingCapacityImage,
 		PendingCapacityPriorityClass: *pendingCapacityPriorityClass,
+		PendingCapacityTTL:           *pendingCapacityTTL,
 	}).SetupWithManager(ctx, mgr); err != nil {
 		app.Fatalf("failed to create controller: %v", err)
 	}
