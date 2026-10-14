@@ -457,15 +457,14 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 		return fmt.Errorf("could not find pod to attach to: %w", err)
 	}
 
-	// A short command can finish before we get here. Attaching to it then only leaves
-	// client-go's stdin copy writing to a closed stream once the user presses return, so
-	// show what it printed instead.
+	// A short command can finish before we get here. Attach would then sit on a
+	// closed stream until the user presses return, and show nothing, because the
+	// attach API does not replay output. Show the end of the logs instead.
 	if terminated := terminatedState(pod, containerName); terminated != nil {
 		_, _ = fmt.Fprintf(opts.IO.ErrOut, "Console has already finished, so showing its logs instead of attaching.\n")
-		if err := c.copyLogs(ctx, pod, containerName, opts.IO); err != nil {
+		if err := c.copyLogTail(ctx, pod, containerName, opts.IO.Out, finishedLogLines); err != nil {
 			_, _ = fmt.Fprintf(opts.IO.ErrOut, "WARN: failed to copy logs from pod: %v\n", err)
 		}
-
 		return containerExitError(pod, containerName, terminated)
 	}
 
@@ -482,6 +481,13 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 	stdin := newStdinGate(opts.IO.In)
 	defer stdin.Close()
 
+	// Count what the attach stream actually showed. A container that exits before the
+	// stream delivers anything leaves this at zero: the user pressed return and saw
+	// nothing.
+	shown := &countingWriter{w: opts.IO.Out}
+	attachIO := opts.IO
+	attachIO.Out = shown
+
 	// The attacher can hang under some circumstances. Therefore we need to run it separately, and
 	// not wait for its completion before exiting the CLI.
 	attachErrCh := make(chan error, 1)
@@ -492,7 +498,7 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 			}
 		}()
 
-		attachErr := attacher.Attach(ctx, pod, containerName, opts.IO, stdin)
+		attachErr := attacher.Attach(ctx, pod, containerName, attachIO, stdin)
 		stdin.Close()
 		attachErrCh <- attachErr
 	}()
@@ -508,59 +514,126 @@ func (c *Runner) Attach(ctx context.Context, opts AttachOptions) error {
 	// Our pod has now completed, and we have its exit status, so we wait for either of:
 	// 1. The attach goroutine to complete.
 	// 2. The attach goroutine to have *not* completed, after 5 seconds.
+	var (
+		attachErr error
+		hung      bool
+	)
 	select {
-	case err := <-attachErrCh:
-		// Our attach completed, either normally or with an error.
-		if err != nil {
-			if !strings.Contains(err.Error(), fmt.Sprintf("container %s not found in pod %s", containerName, pod.Name)) {
-				fmt.Fprintf(opts.IO.ErrOut, "WARN: attach resulted in an error: %v\n", err)
-				// It's quite a normal case that true, the pod has already terminated, quicker than
-				// we could attach to it.
-				// However, in this block, that *isn't* the case. We may have already copied some of
-				// the console's output to the terminal, but we can't be sure of how much of it came
-				// through, as we have no indicator of when the attach failed in respect to the
-				// console pod's lifetime.
-				// By re-dumping the logs, after this block, we can ensure that the user sees the
-				// full output, but it could be duplicates of previously-dumped lines!
-				fmt.Fprintf(opts.IO.ErrOut, "WARN: re-copying pod logs, duplicate output is possible\n")
-			}
-
-			if copyErr := c.copyLogs(ctx, pod, containerName, opts.IO); copyErr != nil {
-				fmt.Fprintf(opts.IO.ErrOut, "WARN: failed to copy logs from pod: %v\n", copyErr)
-			}
-		}
-
-		return podStatusErr
-
+	case attachErr = <-attachErrCh:
 	case <-time.After(5 * time.Second):
+		hung = true
+	}
+
+	// Re-read the pod. The copy Attach started with is from before the container
+	// exited, and waitForSuccess does not return that status object.
+	terminated := c.terminatedContainer(ctx, pod, containerName)
+	if shouldShowFinishedLogs(attachErr, shown.Len(), terminated != nil) {
+		c.showFinishedLogTail(ctx, pod, containerName, opts.IO.Out, opts.IO.ErrOut)
+	} else if hung {
 		// Our attach didn't complete (maybe it's hanging), so we should continue so as not
 		// to block program termination, especially in the case of a non-interactive
 		// console.
 		fmt.Fprintf(opts.IO.ErrOut, "WARN: attach didn't complete. re-copying pod logs, duplicate output is possible\n")
-
 		if err := c.copyLogs(ctx, pod, containerName, opts.IO); err != nil {
 			fmt.Fprintf(opts.IO.ErrOut, "WARN: failed to copy logs from pod: %v\n", err)
 		}
+	} else if attachErr != nil {
+		if !strings.Contains(attachErr.Error(), fmt.Sprintf("container %s not found in pod %s", containerName, pod.Name)) {
+			fmt.Fprintf(opts.IO.ErrOut, "WARN: attach resulted in an error: %v\n", attachErr)
+			// The attach failed after the container had already produced output. Copy the
+			// logs as well, in case the stream stopped short. Lines can repeat.
+			fmt.Fprintf(opts.IO.ErrOut, "WARN: re-copying pod logs, duplicate output is possible\n")
+		}
+		if err := c.copyLogs(ctx, pod, containerName, opts.IO); err != nil {
+			fmt.Fprintf(opts.IO.ErrOut, "WARN: failed to copy logs from pod: %v\n", err)
+		}
+	}
 
-		return podStatusErr
+	if terminated != nil {
+		return containerExitError(pod, containerName, terminated)
+	}
+	return podStatusErr
+}
+
+// finishedLogLines is how much of a finished console we print in place of the
+// attach stream. The same number as core's `console attach`.
+const finishedLogLines int64 = 50
+
+// shouldShowFinishedLogs reports whether to print the log tail. A session that
+// already showed output, and then exited cleanly, is left alone. We print the
+// tail when the attach stream died with a closed stream or a broken pipe, or
+// when the container finished and the stream showed nothing.
+func shouldShowFinishedLogs(attachErr error, outputBytes int, containerTerminated bool) bool {
+	if attachStreamClosed(attachErr) {
+		return true
+	}
+	return containerTerminated && outputBytes == 0
+}
+
+// attachStreamClosed reports the errors client-go and spdystream return when
+// stdin is written after the container has gone.
+func attachStreamClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "closed stream") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "use of closed network connection")
+}
+
+func (c *Runner) showFinishedLogTail(ctx context.Context, pod *corev1.Pod, containerName string, out, errOut io.Writer) {
+	_, _ = fmt.Fprintf(errOut, "Console finished before its output could be shown, so showing the last %d lines of its logs.\n", finishedLogLines)
+	if err := c.copyLogTail(ctx, pod, containerName, out, finishedLogLines); err != nil {
+		_, _ = fmt.Fprintf(errOut, "WARN: failed to copy logs from pod: %v\n", err)
 	}
 }
 
-func (c *Runner) copyLogs(ctx context.Context, pod *corev1.Pod, containerName string, streams IOStreams) error {
-	pods := c.clientset.CoreV1().Pods(pod.Namespace)
+func (c *Runner) terminatedContainer(ctx context.Context, pod *corev1.Pod, containerName string) *corev1.ContainerStateTerminated {
+	fresh, err := c.clientset.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil
+	}
+	return terminatedState(fresh, containerName)
+}
 
-	logs, err := pods.GetLogs(pod.Name, &corev1.PodLogOptions{Container: containerName}).Stream(ctx)
+func (c *Runner) copyLogs(ctx context.Context, pod *corev1.Pod, containerName string, streams IOStreams) error {
+	return c.copyLogTail(ctx, pod, containerName, streams.Out, 0)
+}
+
+// copyLogTail copies the container's logs to out. lines is the tail length;
+// zero copies the whole log.
+func (c *Runner) copyLogTail(ctx context.Context, pod *corev1.Pod, containerName string, out io.Writer, lines int64) error {
+	opts := &corev1.PodLogOptions{Container: containerName}
+	if lines > 0 {
+		opts.TailLines = &lines
+	}
+
+	logs, err := c.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, opts).Stream(ctx)
 	if err != nil {
 		return err
 	}
-
 	defer logs.Close()
 
-	_, err = io.Copy(streams.Out, logs)
-	if err != nil {
-		return err
-	}
-	return nil
+	_, err = io.Copy(out, logs)
+	return err
+}
+
+// countingWriter counts bytes written to w. Attach uses it to tell a session
+// that showed output from one that returned before any output arrived.
+type countingWriter struct {
+	w io.Writer
+	n atomic.Int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingWriter) Len() int {
+	return int(c.n.Load())
 }
 
 // stdinGate passes reads through to the user's stdin until it's closed. A read that

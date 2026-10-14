@@ -188,6 +188,32 @@ var _ = Describe("Attach", func() {
 
 			By("Not reporting that it had already finished")
 			Expect(stderr.String()).NotTo(ContainSubstring("Console has already finished"))
+
+			By("Showing the log tail, because the attach stream produced nothing")
+			Expect(stderr.String()).To(ContainSubstring("showing the last 50 lines of its logs"))
+		})
+	})
+
+	When("the container exits 0 while we attach and the stream showed nothing", func() {
+		BeforeEach(func() {
+			setContainerState(corev1.ContainerState{Running: &corev1.ContainerStateRunning{}})
+		})
+
+		It("succeeds and shows the log tail", func() {
+			ctx := withDeadline()
+
+			result := make(chan error, 1)
+			go func() {
+				defer GinkgoRecover()
+				result <- attach(ctx)
+			}()
+
+			Eventually(attaching).Should(Receive())
+			setContainerState(terminated(0, "Completed"))
+
+			Eventually(result, 10*time.Second).Should(Receive(BeNil()))
+			Expect(stderr.String()).To(ContainSubstring("showing the last 50 lines of its logs"))
+			Expect(stdout.String()).To(BeEmpty())
 		})
 	})
 })
