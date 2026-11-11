@@ -9,6 +9,7 @@ import (
 	"github.com/go-logr/logr"
 	workloadsv1alpha1 "github.com/gocardless/theatre/v5/api/workloads/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,11 +66,17 @@ func (c *ConsoleAttachObserverWebhook) Handle(ctx context.Context, req admission
 	// Get the associated pod. This will have the same name, and
 	// exist in the same namespace as the pod attach options we
 	// receive in the request.
+	//
+	// The manager only caches pods labelled with a console name, so any
+	// other pod is not found here. That means it is not a console.
 	pod := &corev1.Pod{}
 	if err := c.client.Get(rctx, client.ObjectKey{
 		Namespace: req.Namespace,
 		Name:      req.Name,
 	}, pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return admission.Allowed("not a console; skipping observation")
+		}
 		logger.Error(err, "failed to get pod")
 		return admission.Errored(http.StatusBadRequest, err)
 	}

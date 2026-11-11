@@ -78,6 +78,7 @@ var _ = BeforeSuite(func() {
 	mgr, err = ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:        scheme,
 		WebhookServer: server,
+		Cache:         consolecontroller.CacheOptions(),
 		Metrics: metricsserver.Options{
 			BindAddress: "0",
 		},
