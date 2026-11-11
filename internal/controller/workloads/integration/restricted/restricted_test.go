@@ -129,7 +129,7 @@ var _ = Describe("Console RBAC with restrict-approver-role and subjects-without-
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      podName,
 				Namespace: namespaceName,
-				Labels:    labels.Set{"job-name": fmt.Sprintf("%s-console", consoleName)},
+				Labels:    labels.Set{"job-name": fmt.Sprintf("%s-console", consoleName), "console-name": consoleName},
 			},
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{Image: "alpine:latest", Name: "console-container-0"}},

@@ -354,7 +354,7 @@ var _ = Describe("Console", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      podName,
 					Namespace: namespaceName,
-					Labels:    labels.Set{"job-name": jobName},
+					Labels:    labels.Set{"job-name": jobName, "console-name": consoleName},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -675,7 +675,7 @@ var _ = Describe("Console", func() {
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      fmt.Sprintf("%s-console-abcde", consoleName),
 							Namespace: namespaceName,
-							Labels:    labels.Set{"job-name": fmt.Sprintf("%s-console", consoleName)},
+							Labels:    labels.Set{"job-name": fmt.Sprintf("%s-console", consoleName), "console-name": consoleName},
 						},
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Image: "alpine:latest", Name: "console-container-0"}},

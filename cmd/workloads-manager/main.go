@@ -100,6 +100,7 @@ func main() {
 		LeaderElectionReleaseOnCancel: true,
 		Scheme:                        scheme,
 		WebhookServer:                 webhookServer,
+		Cache:                         consolecontroller.CacheOptions(),
 		Metrics: metricsserver.Options{
 			BindAddress: fmt.Sprintf("%s:%d", commonOpts.MetricAddress, commonOpts.MetricPort),
 		},
