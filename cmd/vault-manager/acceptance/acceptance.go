@@ -339,7 +339,7 @@ spec:
         - name: VAULT_NON_ASCII_FILE 
           value: vault-file:file-non-ascii
       command:
-        - bash
+        - sh
         - -c
         - 'echo -n "file:" && cat $(echo $VAULT_FILE_RESOLVED_KEY) &&
            echo -n " tmp:" && cat $(echo $VAULT_TMP_FILE_RESOLVED_KEY) &&
