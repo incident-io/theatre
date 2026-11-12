@@ -113,7 +113,7 @@ func main() {
 		}
 
 		logger.Log("msg", "preparing acceptance image", "containerTool", *containerTool)
-		buildCmd := exec.CommandContext(ctx, *containerTool, "build", "-t", *prepareImage, "-f", *prepareDockerfile, path.Dir(*prepareDockerfile))
+		buildCmd := exec.CommandContext(ctx, *containerTool, "build", "--target", "acceptance", "-t", *prepareImage, "-f", *prepareDockerfile, path.Dir(*prepareDockerfile))
 
 		if err := pipeOutput(buildCmd).Run(); err != nil {
 			app.Fatalf("failed to build acceptance image: %v", err)
