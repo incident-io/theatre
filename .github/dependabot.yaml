@@ -1,17 +1,41 @@
 ---
+# Each ecosystem holds back a new release for 3 days before proposing it, so a bad release
+# has time to be pulled first. Security updates skip the cooldown and arrive as soon as
+# there's an advisory:
+# https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown-
 version: 2
 updates:
-  # Maintain dependencies for GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 3
+    groups:
+      github-actions:
+        patterns: ["*"]
 
-  # Golang
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 3
+    groups:
+      go-modules:
+        patterns: ["*"]
     # Stop dependabot automatically rebases open pull requests when it
     # detects any changes
     rebase-strategy: "disabled"
+
+  # The builder and runtime base images in the Dockerfile, pinned by tag and digest.
+  # Grouped so the two move together.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    groups:
+      docker-base-images:
+        patterns: ["*"]
