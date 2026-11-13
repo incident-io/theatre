@@ -46,5 +46,6 @@ jobs:
           push: true
           tags: |
             europe-docker.pkg.dev/incident-io-container-images/incident-io/theatre:${{ github.sha }}
+            europe-docker.pkg.dev/incident-io-container-images/incident-io/theatre:latest
           build-args: |
             git_revision=${{ github.sha }}
