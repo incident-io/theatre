@@ -33,6 +33,16 @@ jobs:
       - name: Ensure generated CRDs and manifests are up to date
         run: make manifests && git diff --exit-code config/
 
+  # Fails on known vulnerabilities that the code actually reaches. Scoped to
+  # workloads-manager, the only binary the image ships: vault-manager and pkg/cicd reach
+  # vulnerable modules that have no fix or that we don't deploy.
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - *setup-go
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./cmd/workloads-manager/...
+
   vet:
     runs-on: ubuntu-latest
     steps:
