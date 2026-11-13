@@ -24,10 +24,10 @@ jobs:
   check-generated-resources:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - &setup-go
         name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
       - name: Ensure generated CRDs and manifests are up to date
@@ -39,14 +39,14 @@ jobs:
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - *setup-go
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./cmd/workloads-manager/...
 
   vet:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - *setup-go
       - name: Ensure no go vet errors
         run: |
@@ -55,7 +55,7 @@ jobs:
   unit-integration:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - *setup-go
       - name: Run tests
         run: make test
@@ -63,7 +63,7 @@ jobs:
   acceptance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - *setup-go
       - name: Build test binaries
         run: make bin/acceptance.linux
