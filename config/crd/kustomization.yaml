@@ -6,6 +6,7 @@ commonLabels:
 
 resources:
   - bases/rbac.crd.gocardless.com_directoryrolebindings.yaml
+  - bases/rbac.crd.gocardless.com_pamrolebindings.yaml
   - bases/workloads.crd.gocardless.com_consoles.yaml
   - bases/workloads.crd.gocardless.com_consoleauthorisations.yaml
   - bases/workloads.crd.gocardless.com_consoletemplates.yaml
