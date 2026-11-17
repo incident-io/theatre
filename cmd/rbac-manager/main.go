@@ -22,6 +22,7 @@ import (
 	rbacv1alpha1 "github.com/gocardless/theatre/v5/api/rbac/v1alpha1"
 	"github.com/gocardless/theatre/v5/cmd"
 	directoryrolebinding "github.com/gocardless/theatre/v5/internal/controller/rbac"
+	"github.com/gocardless/theatre/v5/internal/controller/rbac/pamrolebinding"
 	"github.com/gocardless/theatre/v5/pkg/signals"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -38,6 +39,12 @@ var (
 	// DirectoryRoleBinding needs update on every RoleBinding it owns. Clusters that don't use
 	// it can turn it off, and then drop that permission from rbac-manager's ClusterRole.
 	directoryRoleBindingEnabled = app.Flag("directory-role-binding", "Run the DirectoryRoleBinding controller").Default("true").Bool()
+
+	// PAMRoleBinding: binds roles to holders of Google Cloud PAM grants. Uses Application
+	// Default Credentials, which need privilegedaccessmanager.grants.list on the
+	// entitlements' projects, folders or organisations.
+	pamEnabled = app.Flag("pam", "Run the PAMRoleBinding controller").Default("false").Bool()
+	pamRefresh = app.Flag("pam-refresh", "How often each PAMRoleBinding is synced with PAM").Default("10s").Duration()
 
 	// All GoogleGroup related settings
 	googleEnabled  = app.Flag("google", "Enable GoogleGroup subject Kind").Default("false").Bool()
@@ -109,6 +116,26 @@ func main() {
 		}
 	} else {
 		logger.Info("DirectoryRoleBinding controller disabled", "event", "controller.disabled", "controller", "DirectoryRoleBinding")
+	}
+
+	if *pamEnabled {
+		grants, err := pamrolebinding.NewPAMGrantLister(ctx)
+		if err != nil {
+			app.Fatalf("failed to create PAM client: %v", err)
+		}
+		defer grants.Close()
+
+		if err = (&pamrolebinding.Reconciler{
+			Client:          mgr.GetClient(),
+			Log:             ctrl.Log.WithName("controllers").WithName("PAMRoleBinding"),
+			Scheme:          mgr.GetScheme(),
+			Recorder:        mgr.GetEventRecorderFor("rbac-manager"),
+			Grants:          grants,
+			RefreshInterval: *pamRefresh,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "PAMRoleBinding")
+			os.Exit(1)
+		}
 	}
 
 	if err := mgr.Start(ctx); err != nil {
