@@ -58,17 +58,21 @@ spec:
 ```
 
 Every `--pam-refresh` (10s by default), rbac-manager lists the entitlement's active
-grants and keeps one `RoleBinding` per grant holder, named
-`pam-<PAMRoleBinding name>-<local part of their email>`, for the user's email. Each
-binding is owned by the `PAMRoleBinding`, so deleting it removes them all, and is
-annotated with the grant (`pam.rbac.crd.gocardless.com/grant`, `grant-id`), its
-requester, approver, and when it ends (`ends-at`).
+grants and keeps one `RoleBinding` per grant holder, for the user's email. Bindings are
+named `pam-<PAMRoleBinding name>-<local part of their email>-<hash>`, e.g.
+`pam-operator-jane-doe-1a2b3c4d`; the hash keeps names unique and stable. Each binding is
+owned by the `PAMRoleBinding` and annotated with the grant
+(`pam.rbac.crd.gocardless.com/grant`, `grant-id`), its requester, approver, and when it
+ends (`ends-at`). A finalizer deletes the bindings with the `PAMRoleBinding`, even if
+it's deleted with `--cascade=orphan`.
 
-- A binding is deleted when its grant is withdrawn or revoked, and always at `ends-at`,
-  even if PAM can't be reached. A failed call to PAM never removes access early.
+- A binding is deleted when its grant is withdrawn or revoked, and always at `ends-at`
+  (less a 10s allowance for clock skew), even if PAM can't be reached. A failed call to
+  PAM never removes access early.
 - `status` lists the bound grants and when PAM was last listed. The `Synced` condition
-  reports `EntitlementNotFound` (usually a typo in `spec.entitlement`) or
-  `PAMUnreachable`, and events record each grant bound, expired or withdrawn.
+  reports `EntitlementNotFound` (usually a typo in `spec.entitlement`),
+  `EntitlementNotAllowed`, `PAMUnreachable` or `RoleBindingFailed`, and events record
+  each grant bound, expired or withdrawn.
 - Metrics, labelled by `namespace` and `name`:
   `theatre_rbac_pamrolebinding_last_sync_timestamp_seconds`,
   `theatre_rbac_pamrolebinding_entitlement_not_found` and
@@ -81,12 +85,24 @@ eligible users already hold, so the grant adds nothing in IAM.
 To run it, start rbac-manager with `--pam`. It uses Application Default Credentials,
 which need `privilegedaccessmanager.grants.list` on the entitlement's project, folder or
 organisation (e.g. `roles/privilegedaccessmanager.viewer`, through Workload Identity on
-GKE). Its ClusterRole needs `create`, `delete`, `get`, `list` and `watch` on
-`rolebindings`, and `bind` on the roles it hands out: restrict `bind` with
-`resourceNames` so rbac-manager can only grant the roles you intend. It never updates a
-`RoleBinding`. If you don't use `DirectoryRoleBinding`, pass
-`--no-directory-role-binding`, which removes rbac-manager's need to update
-`RoleBinding`s.
+GKE).
+
+**Lock it down.** rbac-manager creates the bindings, so Kubernetes' usual check that you
+may grant a role you bind is made against rbac-manager, not against whoever wrote the
+`PAMRoleBinding`. Anyone who can create one could otherwise point it at an entitlement
+in a project they control. So:
+
+- pass `--pam-entitlement-prefix` (repeatable, e.g. `projects/my-project/`), so only your
+  entitlements are honoured;
+- give rbac-manager's ClusterRole `bind` only on the roles you intend to hand out
+  (`resourceNames`), plus `create`, `delete`, `get`, `list` and `watch` on `rolebindings`,
+  and `update` on `pamrolebindings`, `pamrolebindings/status` and
+  `pamrolebindings/finalizers`. It never updates a `RoleBinding`;
+- restrict who can create `PAMRoleBinding`s, and consider an admission policy that
+  allowlists their `roleRef`s.
+
+If you don't use `DirectoryRoleBinding`, pass `--no-directory-role-binding`, which
+removes rbac-manager's need to update `RoleBinding`s.
 
 ### Workloads
 

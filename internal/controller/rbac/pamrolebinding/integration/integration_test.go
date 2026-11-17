@@ -80,7 +80,7 @@ var _ = Describe("PAMRoleBinding", func() {
 			Eventually(roleBindings).Should(HaveLen(1))
 			rb := roleBindings()[0]
 
-			Expect(rb.Name).To(Equal("pam-operator-alice-smith"))
+			Expect(rb.Name).To(MatchRegexp(`^pam-operator-alice-smith-[0-9a-f]{8}$`))
 			Expect(rb.RoleRef).To(Equal(prb.Spec.RoleRef))
 			Expect(rb.Subjects).To(Equal([]rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: "User", Name: "alice.smith@example.com"}}))
 			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationGrant, alice.Name))
@@ -101,7 +101,7 @@ var _ = Describe("PAMRoleBinding", func() {
 			}).Should(ConsistOf(And(
 				HaveField("User", "alice.smith@example.com"),
 				HaveField("Approver", "bob@example.com"),
-				HaveField("RoleBinding", "pam-operator-alice-smith"),
+				HaveField("RoleBinding", HavePrefix("pam-operator-alice-smith-")),
 			)))
 			Eventually(syncedCondition).Should(HaveField("Status", metav1.ConditionTrue))
 		})
@@ -119,6 +119,20 @@ var _ = Describe("PAMRoleBinding", func() {
 			Eventually(func() []string {
 				return uids(roleBindings())
 			}).Should(And(HaveLen(1), Not(ContainElement(string(rb.UID)))))
+		})
+
+		It("deletes its bindings when it's deleted, even orphaning its dependents", func() {
+			Eventually(roleBindings).Should(HaveLen(1))
+			Expect(k8sClient.Delete(ctx, prb, client.PropagationPolicy(metav1.DeletePropagationOrphan))).To(Succeed())
+			Eventually(roleBindings).Should(BeEmpty())
+		})
+
+		It("adds a finalizer", func() {
+			Eventually(func() []string {
+				got := &rbacv1alpha1.PAMRoleBinding{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(prb), got)).To(Succeed())
+				return got.Finalizers
+			}).Should(ContainElement(pamrolebinding.Finalizer))
 		})
 
 		It("keeps the binding if PAM can't be reached, until the grant ends", func() {
@@ -171,9 +185,20 @@ var _ = Describe("PAMRoleBinding", func() {
 		Expect(roleBindings()).To(BeEmpty())
 	})
 
+	It("refuses entitlements outside the allowed prefixes", func() {
+		prb.Spec.Entitlement = "projects/elsewhere/locations/global/entitlements/" + namespace
+		grants.SetGrants(prb.Spec.Entitlement, grant("erin@example.com", "", time.Hour))
+		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
+
+		Eventually(syncedReason).Should(Equal(rbacv1alpha1.PAMRoleBindingReasonEntitlementNotAllowed))
+		Consistently(roleBindings, time.Second).Should(BeEmpty())
+		Expect(grants.Calls(prb.Spec.Entitlement)).To(BeZero())
+	})
+
 	It("refuses to take over a RoleBinding it doesn't own", func() {
+		name := pamrolebinding.RoleBindingName("operator", "dave@example.com")
 		Expect(k8sClient.Create(ctx, &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "pam-operator-dave", Namespace: namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "view"},
 			Subjects:   []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: "User", Name: "someone@example.com"}},
 		})).To(Succeed())
@@ -184,7 +209,7 @@ var _ = Describe("PAMRoleBinding", func() {
 		Eventually(syncedReason).Should(Equal(rbacv1alpha1.PAMRoleBindingReasonRoleBindingFailed))
 
 		rb := &rbacv1.RoleBinding{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "pam-operator-dave"}, rb)).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, rb)).To(Succeed())
 		Expect(rb.RoleRef.Name).To(Equal("view"))
 	})
 

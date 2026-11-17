@@ -53,8 +53,6 @@ const activeFilter = "state = ACTIVE"
 // PAMGrantLister lists grants from the Google Cloud Privileged Access Manager API.
 type PAMGrantLister struct {
 	client *pam.Client
-	// filter is cleared if PAM ever rejects it, so we fall back to listing every grant.
-	filter string
 }
 
 // NewPAMGrantLister creates a GrantLister using Application Default Credentials.
@@ -64,7 +62,7 @@ func NewPAMGrantLister(ctx context.Context) (*PAMGrantLister, error) {
 		return nil, fmt.Errorf("creating PAM client: %w", err)
 	}
 
-	return &PAMGrantLister{client: client, filter: activeFilter}, nil
+	return &PAMGrantLister{client: client}, nil
 }
 
 func (l *PAMGrantLister) Close() error {
@@ -72,11 +70,12 @@ func (l *PAMGrantLister) Close() error {
 }
 
 func (l *PAMGrantLister) ListActiveGrants(ctx context.Context, entitlement string) ([]Grant, error) {
-	grants, err := l.list(ctx, entitlement, l.filter)
-	if err != nil && l.filter != "" && status.Code(err) == codes.InvalidArgument {
-		// Fall back to filtering client-side, rather than never seeing a grant.
-		l.filter = ""
-		grants, err = l.list(ctx, entitlement, l.filter)
+	grants, err := l.list(ctx, entitlement, activeFilter)
+	if err != nil && status.Code(err) == codes.InvalidArgument {
+		// If PAM rejects the filter, filter client-side rather than never seeing a grant.
+		// Only for this call: an InvalidArgument can also mean a malformed entitlement, which
+		// shouldn't turn filtering off for every other PAMRoleBinding.
+		grants, err = l.list(ctx, entitlement, "")
 	}
 
 	return grants, err
@@ -84,7 +83,7 @@ func (l *PAMGrantLister) ListActiveGrants(ctx context.Context, entitlement strin
 
 func (l *PAMGrantLister) list(ctx context.Context, entitlement, filter string) ([]Grant, error) {
 	grants := []Grant{}
-	it := l.client.ListGrants(ctx, &pampb.ListGrantsRequest{Parent: entitlement, Filter: filter})
+	it := l.client.ListGrants(ctx, &pampb.ListGrantsRequest{Parent: entitlement, Filter: filter, PageSize: 100})
 	for {
 		pb, err := it.Next()
 		if err == iterator.Done {

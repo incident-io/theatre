@@ -88,8 +88,9 @@ var _ = BeforeSuite(func() {
 		Recorder: mgr.GetEventRecorderFor("rbac-manager"),
 		Grants:   grants,
 		// Short, so specs see PAM changes quickly.
-		RefreshInterval: 200 * time.Millisecond,
-		Now:             clock.Now,
+		RefreshInterval:     200 * time.Millisecond,
+		EntitlementPrefixes: []string{"projects/test/"},
+		Now:                 clock.Now,
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	go func() {

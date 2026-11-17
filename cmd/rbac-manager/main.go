@@ -45,6 +45,9 @@ var (
 	// entitlements' projects, folders or organisations.
 	pamEnabled = app.Flag("pam", "Run the PAMRoleBinding controller").Default("false").Bool()
 	pamRefresh = app.Flag("pam-refresh", "How often each PAMRoleBinding is synced with PAM").Default("10s").Duration()
+	// Without this, anyone who can create a PAMRoleBinding could name an entitlement in a
+	// project they control, and grant themselves its role.
+	pamEntitlementPrefixes = app.Flag("pam-entitlement-prefix", "Only allow PAMRoleBindings for entitlements whose name starts with this, e.g. projects/my-project/ (repeatable; default allows any)").Strings()
 
 	// All GoogleGroup related settings
 	googleEnabled  = app.Flag("google", "Enable GoogleGroup subject Kind").Default("false").Bool()
@@ -126,12 +129,13 @@ func main() {
 		defer grants.Close()
 
 		if err = (&pamrolebinding.Reconciler{
-			Client:          mgr.GetClient(),
-			Log:             ctrl.Log.WithName("controllers").WithName("PAMRoleBinding"),
-			Scheme:          mgr.GetScheme(),
-			Recorder:        mgr.GetEventRecorderFor("rbac-manager"),
-			Grants:          grants,
-			RefreshInterval: *pamRefresh,
+			Client:              mgr.GetClient(),
+			Log:                 ctrl.Log.WithName("controllers").WithName("PAMRoleBinding"),
+			Scheme:              mgr.GetScheme(),
+			Recorder:            mgr.GetEventRecorderFor("rbac-manager"),
+			Grants:              grants,
+			RefreshInterval:     *pamRefresh,
+			EntitlementPrefixes: *pamEntitlementPrefixes,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "PAMRoleBinding")
 			os.Exit(1)
