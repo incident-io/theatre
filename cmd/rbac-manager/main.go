@@ -35,6 +35,10 @@ var (
 	refresh    = app.Flag("refresh", "Refresh interval checking directory sources").Default("1m").Duration()
 	commonOpts = cmd.NewCommonOptions(app).WithMetrics(app)
 
+	// DirectoryRoleBinding needs update on every RoleBinding it owns. Clusters that don't use
+	// it can turn it off, and then drop that permission from rbac-manager's ClusterRole.
+	directoryRoleBindingEnabled = app.Flag("directory-role-binding", "Run the DirectoryRoleBinding controller").Default("true").Bool()
+
 	// All GoogleGroup related settings
 	googleEnabled  = app.Flag("google", "Enable GoogleGroup subject Kind").Default("false").Bool()
 	googleSubject  = app.Flag("google-subject", "Service account subject").Default("robot-admin@gocardless.com").String()
@@ -91,16 +95,20 @@ func main() {
 		app.Fatalf("failed to create manager: %v", err)
 	}
 
-	if err = (&directoryrolebinding.DirectoryRoleBindingReconciler{
-		Client:          mgr.GetClient(),
-		Ctx:             ctx,
-		Log:             ctrl.Log.WithName("controllers").WithName("DirectoryRoleBinding"),
-		Provider:        provider,
-		RefreshInterval: *refresh,
-		Scheme:          mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DirectoryRoleBinding")
-		os.Exit(1)
+	if *directoryRoleBindingEnabled {
+		if err = (&directoryrolebinding.DirectoryRoleBindingReconciler{
+			Client:          mgr.GetClient(),
+			Ctx:             ctx,
+			Log:             ctrl.Log.WithName("controllers").WithName("DirectoryRoleBinding"),
+			Provider:        provider,
+			RefreshInterval: *refresh,
+			Scheme:          mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "DirectoryRoleBinding")
+			os.Exit(1)
+		}
+	} else {
+		logger.Info("DirectoryRoleBinding controller disabled", "event", "controller.disabled", "controller", "DirectoryRoleBinding")
 	}
 
 	if err := mgr.Start(ctx); err != nil {
