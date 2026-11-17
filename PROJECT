@@ -24,6 +24,15 @@ resources:
       namespaced: true
     controller: true
     domain: crd.gocardless.com
+    group: rbac
+    kind: PAMRoleBinding
+    path: github.com/gocardless/theatre/api/rbac/v1alpha1
+    version: v1alpha1
+  - api:
+      crdVersion: v1
+      namespaced: true
+    controller: true
+    domain: crd.gocardless.com
     group: workloads
     kind: Console
     path: github.com/gocardless/theatre/api/workloads/v1alpha1
