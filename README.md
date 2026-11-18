@@ -65,20 +65,20 @@ explicit list (there's no "all namespaces" or selector, so a new namespace never
 access by accident), and can change: bindings follow. `roleRef` must be a ClusterRole.
 
 Every `--pam-refresh` (10s by default), rbac-manager lists the entitlement's active
-grants and keeps one `RoleBinding` per grant holder in each namespace, for the user's
-email. Only people
-are bound: a requester must be a bare email or a `user:` principal. Service accounts,
-groups and federated principals are skipped, with a `GrantSkipped` warning event. Bindings are
-named `pam-<PAMRoleBinding name>-<local part of their email>-<hash>`, e.g.
-`pam-operator-jane-doe-1a2b3c4d`; the hash keeps names unique and stable. Each binding is
+grants and keeps one `RoleBinding` per grant in each namespace, for the requester's
+email. Only people are bound: a requester must be a bare email or a `user:` principal.
+Service accounts, groups and federated principals are skipped, with a `GrantSkipped`
+warning event. Bindings are named
+`pam-<PAMRoleBinding name>-<local part of their email>-<hash of the grant>`, e.g.
+`pam-operator-jane-doe-1a2b3c4d`. Each binding is
 owned by the `PAMRoleBinding` and annotated with the grant
 (`pam.rbac.crd.gocardless.com/grant`, `grant-id`), its `requester`, its `approvers`
 (comma-separated, as PAM supports several approval levels), and when it ends
 (`ends-at`). A finalizer deletes the bindings with the `PAMRoleBinding`, even if
 it's deleted with `--cascade=orphan`.
 
-- A binding is deleted when its grant is withdrawn or revoked, and always at `ends-at`
-  (less a 10s allowance for clock skew), even if PAM can't be reached. A failed call to
+- A binding is deleted when its grant ends, is withdrawn or is revoked, and at `ends-at`
+  even if PAM can't be reached. A failed call to
   PAM never removes access early.
 - `status` lists the bound grants (subject, approvers, end time, and the namespaces each
   is bound in) and when PAM was last listed. The `Ready` condition reports `EntitlementNotFound` (usually a typo in `spec.entitlement`),

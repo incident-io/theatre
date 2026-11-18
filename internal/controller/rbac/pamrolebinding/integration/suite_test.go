@@ -81,15 +81,15 @@ var _ = BeforeSuite(func() {
 	clock = &fakeClock{now: time.Now()}
 
 	Expect((&pamrolebinding.Reconciler{
-		Client:          mgr.GetClient(),
-		Log:             ctrl.Log.WithName("controllers").WithName("PAMRoleBinding"),
-		Scheme:          mgr.GetScheme(),
-		Recorder:        mgr.GetEventRecorderFor("rbac-manager"),
-		Grants:          grants,
-		RefreshInterval: 200 * time.Millisecond,
-		Projects:        []string{"test", "123456789"},
-		Now:             clock.Now,
-	}).SetupWithManager(mgr)).To(Succeed())
+		Client:              mgr.GetClient(),
+		Log:                 ctrl.Log.WithName("controllers").WithName("PAMRoleBinding"),
+		Scheme:              mgr.GetScheme(),
+		Recorder:            mgr.GetEventRecorderFor("rbac-manager"),
+		Grants:              grants,
+		RefreshInterval:     200 * time.Millisecond,
+		EntitlementProjects: []string{"test", "123456789"},
+		Now:                 clock.Now,
+	}).SetupWithManager(ctx, mgr)).To(Succeed())
 
 	go func() {
 		defer GinkgoRecover()
