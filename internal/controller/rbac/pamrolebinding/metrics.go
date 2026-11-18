@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	labels = []string{"name"}
+	labels = []string{"namespace", "name"}
 
 	lastSyncTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "theatre_rbac_pamrolebinding_last_sync_timestamp_seconds",
@@ -18,7 +18,7 @@ var (
 	}, labels)
 	activeGrants = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "theatre_rbac_pamrolebinding_active_grants",
-		Help: "Number of grants the PAMRoleBinding currently binds, across its namespaces.",
+		Help: "Number of grants the PAMRoleBinding currently binds.",
 	}, labels)
 )
 
@@ -26,8 +26,8 @@ func init() {
 	metrics.Registry.MustRegister(lastSyncTimestamp, entitlementNotFound, activeGrants)
 }
 
-func forgetMetrics(name string) {
+func forgetMetrics(namespace, name string) {
 	for _, m := range []*prometheus.GaugeVec{lastSyncTimestamp, entitlementNotFound, activeGrants} {
-		m.DeleteLabelValues(name)
+		m.DeleteLabelValues(namespace, name)
 	}
 }
