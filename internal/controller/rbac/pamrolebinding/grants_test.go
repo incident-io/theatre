@@ -38,8 +38,8 @@ var _ = Describe("FromProto", func() {
 	It("ends the requested duration after activation, and records the approver", func() {
 		g, ok := FromProto(grant(pampb.Grant_ACTIVE, approvedEvent, activatedEvent))
 		Expect(ok).To(BeTrue())
-		Expect(g.Requester).To(Equal("alice@example.com"))
-		Expect(g.Approver).To(Equal("bob@example.com"))
+		Expect(g.Requester).To(Equal("Alice@Example.com"))
+		Expect(g.Approvers).To(Equal([]string{"bob@example.com"}))
 		Expect(g.EndsAt).To(Equal(activated.Add(time.Hour)))
 		Expect(g.ID()).To(Equal("abc-123"))
 	})
@@ -47,7 +47,19 @@ var _ = Describe("FromProto", func() {
 	It("leaves the approver empty when no approval was needed", func() {
 		g, ok := FromProto(grant(pampb.Grant_ACTIVE, activatedEvent))
 		Expect(ok).To(BeTrue())
-		Expect(g.Approver).To(BeEmpty())
+		Expect(g.Approvers).To(BeEmpty())
+	})
+
+	It("records every approver, in order, for multi-level approval", func() {
+		second := &pampb.Grant_Timeline_Event{
+			EventTime: timestamppb.New(created.Add(2 * time.Minute)),
+			Event: &pampb.Grant_Timeline_Event_Approved_{
+				Approved: &pampb.Grant_Timeline_Event_Approved{Actor: "Carol@example.com"},
+			},
+		}
+		g, ok := FromProto(grant(pampb.Grant_ACTIVE, approvedEvent, second, activatedEvent))
+		Expect(ok).To(BeTrue())
+		Expect(g.Approvers).To(Equal([]string{"bob@example.com", "carol@example.com"}))
 	})
 
 	It("falls back to the creation time, ending early rather than late", func() {
@@ -69,3 +81,23 @@ var _ = Describe("FromProto", func() {
 		Entry("withdrawn", pampb.Grant_WITHDRAWN),
 	)
 })
+
+var _ = DescribeTable("BindableUser",
+	func(requester, want string, ok bool) {
+		got, err := BindableUser(requester)
+		if !ok {
+			Expect(err).To(HaveOccurred())
+			return
+		}
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(want))
+	},
+	Entry("a bare email", "Alice@Example.com", "alice@example.com", true),
+	Entry("a user: principal", "user:alice@example.com", "alice@example.com", true),
+	Entry("a group", "group:team@example.com", "", false),
+	Entry("a service account principal", "serviceAccount:bot@p.iam.gserviceaccount.com", "", false),
+	Entry("a service account email", "bot@p.iam.gserviceaccount.com", "", false),
+	Entry("a federated principal", "principal://iam.googleapis.com/locations/global/workforcePools/p/subject/alice", "", false),
+	Entry("not an email", "alice", "", false),
+	Entry("empty", "", "", false),
+)

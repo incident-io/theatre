@@ -41,13 +41,10 @@ var (
 	directoryRoleBindingEnabled = app.Flag("directory-role-binding", "Run the DirectoryRoleBinding controller").Default("true").Bool()
 
 	// PAMRoleBinding: binds roles to holders of Google Cloud PAM grants. Uses Application
-	// Default Credentials, which need privilegedaccessmanager.grants.list on the
-	// entitlements' projects, folders or organisations.
+	// Default Credentials, which need privilegedaccessmanager.grants.list on the project
+	// rbac-manager runs in. Only entitlements in that project are honoured.
 	pamEnabled = app.Flag("pam", "Run the PAMRoleBinding controller").Default("false").Bool()
 	pamRefresh = app.Flag("pam-refresh", "How often each PAMRoleBinding is synced with PAM").Default("10s").Duration()
-	// Without this, anyone who can create a PAMRoleBinding could name an entitlement in a
-	// project they control, and grant themselves its role.
-	pamEntitlementPrefixes = app.Flag("pam-entitlement-prefix", "Only allow PAMRoleBindings for entitlements whose name starts with this, e.g. projects/my-project/ (repeatable; default allows any)").Strings()
 
 	// All GoogleGroup related settings
 	googleEnabled  = app.Flag("google", "Enable GoogleGroup subject Kind").Default("false").Bool()
@@ -122,6 +119,15 @@ func main() {
 	}
 
 	if *pamEnabled {
+		// Only entitlements in our own project are honoured: anyone who can create a
+		// PAMRoleBinding could otherwise name an entitlement in a project they control and
+		// grant themselves its role. Refuse to start rather than allow any project.
+		projects, err := ownProject(ctx)
+		if err != nil {
+			app.Fatalf("failed to find this cluster's Google Cloud project, which PAMRoleBindings' entitlements must be in: %v", err)
+		}
+		logger.Info("PAMRoleBindings limited to this project's entitlements", "event", "pam.projects", "projects", projects)
+
 		grants, err := pamrolebinding.NewPAMGrantLister(ctx)
 		if err != nil {
 			app.Fatalf("failed to create PAM client: %v", err)
@@ -129,13 +135,13 @@ func main() {
 		defer grants.Close()
 
 		if err = (&pamrolebinding.Reconciler{
-			Client:              mgr.GetClient(),
-			Log:                 ctrl.Log.WithName("controllers").WithName("PAMRoleBinding"),
-			Scheme:              mgr.GetScheme(),
-			Recorder:            mgr.GetEventRecorderFor("rbac-manager"),
-			Grants:              grants,
-			RefreshInterval:     *pamRefresh,
-			EntitlementPrefixes: *pamEntitlementPrefixes,
+			Client:          mgr.GetClient(),
+			Log:             ctrl.Log.WithName("controllers").WithName("PAMRoleBinding"),
+			Scheme:          mgr.GetScheme(),
+			Recorder:        mgr.GetEventRecorderFor("rbac-manager"),
+			Grants:          grants,
+			RefreshInterval: *pamRefresh,
+			Projects:        projects,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "PAMRoleBinding")
 			os.Exit(1)
@@ -197,4 +203,21 @@ func createGoogleDirectory(ctx context.Context, subject string) (*directoryv1.Se
 	}
 
 	return directoryv1.NewService(ctx, option.WithTokenSource(ts))
+}
+
+// ownProject returns the ID and number of the Google Cloud project we run in, from the
+// metadata server. Entitlement names can use either.
+func ownProject(ctx context.Context) ([]string, error) {
+	id, err := metadata.ProjectIDWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading project ID: %w", err)
+	}
+	number, err := metadata.NumericProjectIDWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading project number: %w", err)
+	}
+	if id == "" || number == "" {
+		return nil, fmt.Errorf("metadata server returned an empty project ID (%q) or number (%q)", id, number)
+	}
+	return []string{id, number}, nil
 }

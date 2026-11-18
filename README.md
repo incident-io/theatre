@@ -58,12 +58,15 @@ spec:
 ```
 
 Every `--pam-refresh` (10s by default), rbac-manager lists the entitlement's active
-grants and keeps one `RoleBinding` per grant holder, for the user's email. Bindings are
+grants and keeps one `RoleBinding` per grant holder, for the user's email. Only people
+are bound: a requester must be a bare email or a `user:` principal. Service accounts,
+groups and federated principals are skipped, with a `GrantSkipped` warning event. Bindings are
 named `pam-<PAMRoleBinding name>-<local part of their email>-<hash>`, e.g.
 `pam-operator-jane-doe-1a2b3c4d`; the hash keeps names unique and stable. Each binding is
 owned by the `PAMRoleBinding` and annotated with the grant
-(`pam.rbac.crd.gocardless.com/grant`, `grant-id`), its requester, approver, and when it
-ends (`ends-at`). A finalizer deletes the bindings with the `PAMRoleBinding`, even if
+(`pam.rbac.crd.gocardless.com/grant`, `grant-id`), its `requester`, its `approvers`
+(comma-separated, as PAM supports several approval levels), and when it ends
+(`ends-at`). A finalizer deletes the bindings with the `PAMRoleBinding`, even if
 it's deleted with `--cascade=orphan`.
 
 - A binding is deleted when its grant is withdrawn or revoked, and always at `ends-at`
@@ -82,18 +85,19 @@ it's deleted with `--cascade=orphan`.
 The entitlement must grant some IAM role for PAM to create grants. Pick one the
 eligible users already hold, so the grant adds nothing in IAM.
 
-To run it, start rbac-manager with `--pam`. It uses Application Default Credentials,
-which need `privilegedaccessmanager.grants.list` on the entitlement's project, folder or
-organisation (e.g. `roles/privilegedaccessmanager.viewer`, through Workload Identity on
-GKE).
+To run it, start rbac-manager with `--pam`. It only honours entitlements in the Google
+Cloud project it runs in, which it reads from the metadata server at startup, and won't
+start if it can't. Other entitlements are refused with `EntitlementNotAllowed`. It uses
+Application Default Credentials, which need `privilegedaccessmanager.grants.list` on
+that project (e.g. `roles/privilegedaccessmanager.viewer`, through Workload Identity on
+GKE). `spec.entitlement` is immutable: to point a binding at another entitlement,
+recreate it.
 
 **Lock it down.** rbac-manager creates the bindings, so Kubernetes' usual check that you
 may grant a role you bind is made against rbac-manager, not against whoever wrote the
-`PAMRoleBinding`. Anyone who can create one could otherwise point it at an entitlement
-in a project they control. So:
+`PAMRoleBinding`. Limiting entitlements to rbac-manager's own project stops anyone who
+can create one pointing it at an entitlement in a project they control. Also:
 
-- pass `--pam-entitlement-prefix` (repeatable, e.g. `projects/my-project/`), so only your
-  entitlements are honoured;
 - give rbac-manager's ClusterRole `bind` only on the roles you intend to hand out
   (`resourceNames`), plus `create`, `delete`, `get`, `list` and `watch` on `rolebindings`,
   and `update` on `pamrolebindings`, `pamrolebindings/status` and

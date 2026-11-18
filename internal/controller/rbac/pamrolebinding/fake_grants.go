@@ -11,6 +11,15 @@ type FakeGrantLister struct {
 	grants map[string][]Grant
 	errs   map[string]error
 	calls  map[string]int
+	during func()
+}
+
+// SetDuringList sets a function to run inside every ListActiveGrants call, e.g. to move
+// a fake clock forward as if PAM were slow to answer. nil clears it.
+func (f *FakeGrantLister) SetDuringList(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.during = fn
 }
 
 func NewFakeGrantLister() *FakeGrantLister {
@@ -43,6 +52,9 @@ func (f *FakeGrantLister) ListActiveGrants(_ context.Context, entitlement string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls[entitlement]++
+	if f.during != nil {
+		f.during()
+	}
 	if err, ok := f.errs[entitlement]; ok {
 		return nil, err
 	}

@@ -3,6 +3,7 @@ package integration
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -48,7 +49,7 @@ var _ = Describe("PAMRoleBinding", func() {
 		return pamrolebinding.Grant{
 			Name:      fmt.Sprintf("%s/grants/%s", entitlement, uuid.NewString()),
 			Requester: user,
-			Approver:  approver,
+			Approvers: approvers(approver),
 			EndsAt:    clock.Now().Add(endsIn).Truncate(time.Second),
 		}
 	}
@@ -85,7 +86,8 @@ var _ = Describe("PAMRoleBinding", func() {
 			Expect(rb.Subjects).To(Equal([]rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: "User", Name: "alice.smith@example.com"}}))
 			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationGrant, alice.Name))
 			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationGrantID, alice.ID()))
-			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationApprover, "bob@example.com"))
+			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationApprovers, "bob@example.com"))
+			Expect(rb.Labels).To(HaveKeyWithValue(pamrolebinding.LabelPAMRoleBinding, "operator"))
 			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationRequester, "alice.smith@example.com"))
 			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationEndsAt, alice.EndsAt.UTC().Format(time.RFC3339)))
 			Expect(rb.OwnerReferences).To(HaveLen(1))
@@ -100,7 +102,7 @@ var _ = Describe("PAMRoleBinding", func() {
 				return got.Status.ActiveGrants
 			}).Should(ConsistOf(And(
 				HaveField("User", "alice.smith@example.com"),
-				HaveField("Approver", "bob@example.com"),
+				HaveField("Approvers", []string{"bob@example.com"}),
 				HaveField("RoleBinding", HavePrefix("pam-operator-alice-smith-")),
 			)))
 			Eventually(syncedCondition).Should(HaveField("Status", metav1.ConditionTrue))
@@ -147,6 +149,30 @@ var _ = Describe("PAMRoleBinding", func() {
 			Eventually(roleBindings).Should(BeEmpty())
 		})
 
+		It("replaces a binding whose label has been removed", func() {
+			Eventually(roleBindings).Should(HaveLen(1))
+			rb := roleBindings()[0]
+			delete(rb.Labels, pamrolebinding.LabelPAMRoleBinding)
+			Expect(k8sClient.Update(ctx, &rb)).To(Succeed())
+
+			Eventually(func() []rbacv1.RoleBinding {
+				rbs := roleBindings()
+				if len(rbs) == 1 && rbs[0].UID != rb.UID {
+					return rbs
+				}
+				return nil
+			}).Should(ConsistOf(HaveField("Labels", HaveKeyWithValue(pamrolebinding.LabelPAMRoleBinding, "operator"))))
+		})
+
+		It("still removes a binding whose label has been removed, when its grant is withdrawn", func() {
+			Eventually(roleBindings).Should(HaveLen(1))
+			rb := roleBindings()[0]
+			delete(rb.Labels, pamrolebinding.LabelPAMRoleBinding)
+			grants.SetGrants(entitlement)
+			Expect(k8sClient.Update(ctx, &rb)).To(Succeed())
+			Eventually(roleBindings).Should(BeEmpty())
+		})
+
 		It("moves a user to their newer grant", func() {
 			Eventually(roleBindings).Should(HaveLen(1))
 			newer := grant("alice.smith@example.com", "", 3*time.Hour)
@@ -160,7 +186,7 @@ var _ = Describe("PAMRoleBinding", func() {
 				return rbs[0].Annotations
 			}).Should(And(
 				HaveKeyWithValue(pamrolebinding.AnnotationGrant, newer.Name),
-				Not(HaveKey(pamrolebinding.AnnotationApprover)),
+				Not(HaveKey(pamrolebinding.AnnotationApprovers)),
 			))
 		})
 	})
@@ -174,6 +200,45 @@ var _ = Describe("PAMRoleBinding", func() {
 		Eventually(roleBindings).Should(BeEmpty())
 	})
 
+	It("doesn't bind a grant that ends while PAM is answering", func() {
+		grants.SetGrants(entitlement, grant("frank@example.com", "", 25*time.Second))
+		grants.SetDuringList(func() { clock.Advance(28 * time.Second) })
+		DeferCleanup(func() { grants.SetDuringList(nil) })
+		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
+
+		Eventually(syncedReason).Should(Equal(rbacv1alpha1.PAMRoleBindingReasonSynced))
+		Consistently(roleBindings, time.Second).Should(BeEmpty())
+	})
+
+	It("doesn't bind requesters that aren't people", func() {
+		grants.SetGrants(entitlement,
+			grant("bot@my-project.iam.gserviceaccount.com", "", time.Hour),
+			grant("group:team@example.com", "", time.Hour),
+			grant("grace@example.com", "", time.Hour),
+		)
+		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
+
+		Eventually(roleBindings).Should(ConsistOf(HaveField("Subjects", ConsistOf(HaveField("Name", "grace@example.com")))))
+		Eventually(func() []string {
+			events := &corev1.EventList{}
+			Expect(k8sClient.List(ctx, events, client.InNamespace(namespace))).To(Succeed())
+			reasons := []string{}
+			for _, e := range events.Items {
+				reasons = append(reasons, e.Reason)
+			}
+			return reasons
+		}).Should(ContainElement(pamrolebinding.EventGrantSkipped))
+	})
+
+	It("binds users for a PAMRoleBinding whose name is too long for a label", func() {
+		prb.Name = strings.Repeat("a", 70)
+		grants.SetGrants(entitlement, grant("heidi@example.com", "", time.Hour))
+		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
+
+		Eventually(roleBindings).Should(ConsistOf(HaveField("Labels", HaveKeyWithValue(pamrolebinding.LabelPAMRoleBinding, strings.Repeat("a", 63)))))
+		Eventually(syncedReason).Should(Equal(rbacv1alpha1.PAMRoleBindingReasonSynced))
+	})
+
 	It("reports an entitlement that doesn't exist", func() {
 		// The fake reports any entitlement it has no grants for as not found.
 		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
@@ -185,8 +250,15 @@ var _ = Describe("PAMRoleBinding", func() {
 		Expect(roleBindings()).To(BeEmpty())
 	})
 
-	It("refuses entitlements outside the allowed prefixes", func() {
-		prb.Spec.Entitlement = "projects/elsewhere/locations/global/entitlements/" + namespace
+	It("binds grants on an entitlement named by project number", func() {
+		prb.Spec.Entitlement = "projects/123456789/locations/global/entitlements/" + namespace
+		grants.SetGrants(prb.Spec.Entitlement, grant("ivan@example.com", "", time.Hour))
+		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
+		Eventually(roleBindings).Should(HaveLen(1))
+	})
+
+	It("refuses entitlements in other projects, even ones whose ID starts with ours", func() {
+		prb.Spec.Entitlement = "projects/test-evil/locations/global/entitlements/" + namespace
 		grants.SetGrants(prb.Spec.Entitlement, grant("erin@example.com", "", time.Hour))
 		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
 
@@ -232,4 +304,11 @@ func uids(rbs []rbacv1.RoleBinding) []string {
 		out = append(out, string(rb.UID))
 	}
 	return out
+}
+
+func approvers(approver string) []string {
+	if approver == "" {
+		return nil
+	}
+	return []string{approver}
 }
