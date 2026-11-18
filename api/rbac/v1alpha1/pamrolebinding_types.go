@@ -21,8 +21,13 @@ const (
 type PAMRoleBindingSpec struct {
 	// Entitlement is the full resource name of a Google Cloud Privileged Access Manager
 	// (PAM) entitlement. Every user with an active grant on it is bound to RoleRef in this
-	// namespace, for as long as the grant lasts.
-	// +kubebuilder:validation:Pattern=`^(projects|folders|organizations)/[^/]+/locations/[^/]+/entitlements/[^/]+$`
+	// namespace, for as long as the grant lasts. rbac-manager only honours entitlements in
+	// the Google Cloud project it runs in.
+	//
+	// It's immutable: pointing a PAMRoleBinding at another entitlement would keep the old
+	// one's bindings until they expire. Recreate the PAMRoleBinding instead.
+	// +kubebuilder:validation:Pattern=`^projects/[^/]+/locations/[^/]+/entitlements/[^/]+$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Entitlement is immutable"
 	Entitlement string `json:"entitlement"`
 
 	// RoleRef is the Role or ClusterRole to bind each grant holder to.
@@ -36,9 +41,10 @@ type PAMGrant struct {
 	User string `json:"user"`
 	// Grant is the full resource name of the PAM grant.
 	Grant string `json:"grant"`
-	// Approver is the email address of whoever approved the grant, if it needed approval.
+	// Approvers are the email addresses of everyone who approved the grant, in order. Empty
+	// if it needed no approval.
 	// +optional
-	Approver string `json:"approver,omitempty"`
+	Approvers []string `json:"approvers,omitempty"`
 	// EndsAt is when the grant ends. The RoleBinding is removed then, even if PAM can't be
 	// reached.
 	EndsAt metav1.Time `json:"endsAt"`
