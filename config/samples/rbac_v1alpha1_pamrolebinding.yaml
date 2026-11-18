@@ -1,13 +1,15 @@
 ---
-# Anyone with an active grant on the PAM entitlement gets the `edit` ClusterRole in this
-# namespace, until their grant ends.
+# Anyone with an active grant on the PAM entitlement gets the `edit` ClusterRole in both
+# namespaces, until their grant ends.
 apiVersion: rbac.crd.gocardless.com/v1alpha1
 kind: PAMRoleBinding
 metadata:
-  name: editor
-  namespace: my-app
+  name: my-app-editor
 spec:
   entitlement: projects/my-project/locations/global/entitlements/my-app-editor
+  namespaces:
+    - my-app
+    - my-app-workers
   roleRef:
     apiGroup: rbac.authorization.k8s.io
     kind: ClusterRole
