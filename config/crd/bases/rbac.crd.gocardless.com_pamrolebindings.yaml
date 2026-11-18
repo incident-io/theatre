@@ -37,8 +37,10 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          PAMRoleBinding binds a role in its namespace to everyone holding an active grant on a
-          Google Cloud Privileged Access Manager (PAM) entitlement, until their grant ends.
+          PAMRoleBinding maps a Google Cloud Privileged Access Manager (PAM) entitlement to a
+          Kubernetes role in its namespace. PAM handles requesting, approving and expiring access;
+          this declares what an active grant on the entitlement means in the cluster. Everyone
+          holding one is bound to the role until their grant ends.
         properties:
           apiVersion:
             description: |-
