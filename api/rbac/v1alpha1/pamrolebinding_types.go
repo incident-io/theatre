@@ -78,8 +78,10 @@ type PAMRoleBindingStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Last sync",type=date,JSONPath=`.status.lastSyncTime`
 
-// PAMRoleBinding binds a role in its namespace to everyone holding an active grant on a
-// Google Cloud Privileged Access Manager (PAM) entitlement, until their grant ends.
+// PAMRoleBinding maps a Google Cloud Privileged Access Manager (PAM) entitlement to a
+// Kubernetes role in its namespace. PAM handles requesting, approving and expiring access;
+// this declares what an active grant on the entitlement means in the cluster. Everyone
+// holding one is bound to the role until their grant ends.
 type PAMRoleBinding struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
