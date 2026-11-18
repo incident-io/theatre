@@ -14,7 +14,7 @@ spec:
     shortNames:
     - prb
     singular: pamrolebinding
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .spec.entitlement
@@ -23,9 +23,6 @@ spec:
       type: string
     - jsonPath: .spec.roleRef.name
       name: Role
-      type: string
-    - jsonPath: .spec.namespaces
-      name: Namespaces
       type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
@@ -40,9 +37,8 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          PAMRoleBinding binds a ClusterRole, in each of a list of namespaces, to everyone holding
-          an active grant on a Google Cloud Privileged Access Manager (PAM) entitlement, until
-          their grant ends.
+          PAMRoleBinding binds a role in its namespace to everyone holding an active grant on a
+          Google Cloud Privileged Access Manager (PAM) entitlement, until their grant ends.
         properties:
           apiVersion:
             description: |-
@@ -73,20 +69,9 @@ spec:
                 x-kubernetes-validations:
                 - message: Entitlement is immutable
                   rule: self == oldSelf
-              namespaces:
-                description: |-
-                  Namespaces are where each grant holder is bound. They're listed explicitly, so a new
-                  namespace never gains access by accident.
-                items:
-                  maxLength: 63
-                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-                  type: string
-                maxItems: 100
-                minItems: 1
-                type: array
-                x-kubernetes-list-type: set
               roleRef:
-                description: RoleRef is the ClusterRole bound in each namespace.
+                description: RoleRef is the Role or ClusterRole bound in this namespace,
+                  as in a RoleBinding.
                 properties:
                   apiGroup:
                     description: APIGroup is the group for the resource being referenced
@@ -106,11 +91,8 @@ spec:
                 x-kubernetes-validations:
                 - message: RoleRef is immutable
                   rule: self == oldSelf
-                - message: RoleRef must be a ClusterRole
-                  rule: self.kind == 'ClusterRole' && self.apiGroup == 'rbac.authorization.k8s.io'
             required:
             - entitlement
-            - namespaces
             - roleRef
             type: object
           status:
@@ -129,25 +111,15 @@ spec:
                       type: array
                     endsAt:
                       description: |-
-                        EndsAt is when the grant ends. The RoleBindings are removed then, even if PAM can't
-                        be reached.
+                        EndsAt is when the grant ends. The RoleBinding is removed then, even if PAM can't be
+                        reached.
                       format: date-time
                       type: string
                     grant:
                       description: Grant is the full resource name of the PAM grant.
                       type: string
-                    namespaces:
-                      description: |-
-                        Namespaces are where the subject is currently bound. This can fall short of
-                        spec.namespaces when a binding fails.
-                      items:
-                        type: string
-                      type: array
-                      x-kubernetes-list-type: set
                     roleBinding:
-                      description: |-
-                        RoleBinding is the name of the grant's RoleBinding, which is the same in every
-                        namespace.
+                      description: RoleBinding is the name of the grant's RoleBinding.
                       type: string
                     subject:
                       description: Subject is the grant's requester.
