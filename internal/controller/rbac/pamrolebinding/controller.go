@@ -56,6 +56,9 @@ const (
 	EventGrantWithdrawn = "GrantWithdrawn"
 	EventSyncFailed     = "SyncFailed"
 	EventGrantSkipped   = "GrantSkipped"
+	// EventNamespaceRemoved is recorded when a namespace is taken out of spec.namespaces,
+	// and the bindings there are removed while the grants carry on elsewhere.
+	EventNamespaceRemoved = "NamespaceRemoved"
 
 	// maxBackoff caps how long we wait between attempts while PAM is failing. Expiry is
 	// scheduled separately, so this only delays new grants and early withdrawals.
@@ -123,12 +126,12 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := r.Log.WithValues("pamrolebinding", req.NamespacedName)
+	logger := r.Log.WithValues("pamrolebinding", req.Name)
 
 	prb := &rbacv1alpha1.PAMRoleBinding{}
 	if err := r.Get(ctx, req.NamespacedName, prb); err != nil {
 		if apierrors.IsNotFound(err) {
-			forgetMetrics(req.Namespace, req.Name)
+			forgetMetrics(req.Name)
 			r.resetFailures(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
@@ -156,25 +159,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Remove bindings whose grant has ended before asking PAM anything, so expiry never
 	// depends on PAM answering.
 	var errs []error
-	for name, rb := range owned {
+	for key, rb := range owned {
 		if expired(rb, now) {
 			if err := r.deleteRoleBinding(ctx, prb, rb, EventGrantExpired); err != nil {
 				errs = append(errs, err)
 				continue
 			}
-			delete(owned, name)
+			delete(owned, key)
 		}
 	}
 
 	if !r.entitlementAllowed(prb.Spec.Entitlement) {
 		err := fmt.Errorf("entitlement %s isn't in rbac-manager's own project (%s)",
 			prb.Spec.Entitlement, strings.Join(r.Projects, " / "))
-		for name, rb := range owned {
+		for key, rb := range owned {
 			if delErr := r.deleteRoleBinding(ctx, prb, rb, EventGrantWithdrawn); delErr != nil {
 				errs = append(errs, delErr)
 				continue
 			}
-			delete(owned, name)
+			delete(owned, key)
 		}
 		return r.syncFailed(ctx, logger, prb, owned, now, rbacv1alpha1.PAMRoleBindingReasonEntitlementNotAllowed, errors.Join(append([]error{err}, errs...)...))
 	}
@@ -199,38 +202,47 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		r.Recorder.Event(prb, corev1.EventTypeWarning, EventGrantSkipped, err.Error())
 	}
 
-	for name, rb := range owned {
-		want, ok := desired[name]
+	// Names of bindings whose subject still has an active grant, in any namespace.
+	stillGranted := map[string]bool{}
+	for key := range desired {
+		stillGranted[key.Name] = true
+	}
+
+	for key, rb := range owned {
+		want, ok := desired[key]
 		if ok && matches(rb, want) {
 			continue
 		}
 		reason := EventGrantWithdrawn
-		if ok {
+		switch {
+		case ok:
 			reason = "" // replaced by a newer grant, recreated below
+		case stillGranted[key.Name]:
+			reason = EventNamespaceRemoved
 		}
 		if err := r.deleteRoleBinding(ctx, prb, rb, reason); err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		delete(owned, name)
+		delete(owned, key)
 	}
 
-	for name, want := range desired {
-		if _, ok := owned[name]; ok {
+	for key, want := range desired {
+		if _, ok := owned[key]; ok {
 			continue
 		}
 		if err := r.createRoleBinding(ctx, prb, want); err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		owned[name] = want
+		owned[key] = want
 	}
 
 	prb.Status.LastSyncTime = &metav1.Time{Time: now}
 	prb.Status.ActiveGrants = activeGrantStatus(owned)
-	lastSyncTimestamp.WithLabelValues(prb.Namespace, prb.Name).Set(float64(now.Unix()))
-	entitlementNotFound.WithLabelValues(prb.Namespace, prb.Name).Set(0)
-	activeGrants.WithLabelValues(prb.Namespace, prb.Name).Set(float64(len(owned)))
+	lastSyncTimestamp.WithLabelValues(prb.Name).Set(float64(now.Unix()))
+	entitlementNotFound.WithLabelValues(prb.Name).Set(0)
+	activeGrants.WithLabelValues(prb.Name).Set(float64(len(prb.Status.ActiveGrants)))
 
 	if len(errs) > 0 {
 		err := errors.Join(errs...)
@@ -243,7 +255,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	r.resetFailures(req.NamespacedName)
 	r.setCondition(prb, metav1.ConditionTrue, rbacv1alpha1.PAMRoleBindingReasonSynced,
-		fmt.Sprintf("%d active grant(s) bound", len(owned)))
+		fmt.Sprintf("%d active grant(s) bound in %d namespace(s)", len(prb.Status.ActiveGrants), len(prb.Spec.Namespaces)))
 	r.updateStatus(ctx, logger, prb)
 
 	return ctrl.Result{RequeueAfter: r.nextSync(owned, now, r.RefreshInterval)}, nil
@@ -252,17 +264,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // syncFailed handles a sync we couldn't finish. A failed list from PAM says nothing about
 // which grants are active, so it never removes access early: expired bindings have
 // already been removed by the time we get here.
-func (r *Reconciler) syncFailed(ctx context.Context, logger logr.Logger, prb *rbacv1alpha1.PAMRoleBinding, remaining map[string]*rbacv1.RoleBinding, now time.Time, reason string, err error) (ctrl.Result, error) {
+func (r *Reconciler) syncFailed(ctx context.Context, logger logr.Logger, prb *rbacv1alpha1.PAMRoleBinding, remaining map[types.NamespacedName]*rbacv1.RoleBinding, now time.Time, reason string, err error) (ctrl.Result, error) {
 	logger.Error(err, "failed to sync with PAM", "reason", reason)
 
 	notFound := 0.0
 	if reason == rbacv1alpha1.PAMRoleBindingReasonEntitlementNotFound {
 		notFound = 1
 	}
-	entitlementNotFound.WithLabelValues(prb.Namespace, prb.Name).Set(notFound)
-	activeGrants.WithLabelValues(prb.Namespace, prb.Name).Set(float64(len(remaining)))
+	entitlementNotFound.WithLabelValues(prb.Name).Set(notFound)
 
 	prb.Status.ActiveGrants = activeGrantStatus(remaining)
+	activeGrants.WithLabelValues(prb.Name).Set(float64(len(prb.Status.ActiveGrants)))
 	r.setCondition(prb, metav1.ConditionFalse, reason, err.Error())
 	r.Recorder.Event(prb, corev1.EventTypeWarning, EventSyncFailed, err.Error())
 	r.updateStatus(ctx, logger, prb)
@@ -274,6 +286,7 @@ func (r *Reconciler) syncFailed(ctx context.Context, logger logr.Logger, prb *rb
 // would swap our expiry-aware RequeueAfter for the rate limiter's backoff, which can run to
 // many minutes.
 func (r *Reconciler) updateStatus(ctx context.Context, logger logr.Logger, prb *rbacv1alpha1.PAMRoleBinding) {
+	prb.Status.ObservedGeneration = prb.Generation
 	if err := r.Status().Update(ctx, prb); err != nil && !apierrors.IsConflict(err) {
 		logger.Error(err, "failed to update status")
 	}
@@ -285,8 +298,10 @@ func (r *Reconciler) finalize(ctx context.Context, prb *rbacv1alpha1.PAMRoleBind
 		return nil
 	}
 
+	// Every namespace, not just spec.namespaces: a namespace may have been removed from the
+	// list while its bindings failed to delete.
 	list := &rbacv1.RoleBindingList{}
-	if err := r.APIReader.List(ctx, list, client.InNamespace(prb.Namespace)); err != nil {
+	if err := r.APIReader.List(ctx, list); err != nil {
 		return fmt.Errorf("listing RoleBindings: %w", err)
 	}
 	for i := range list.Items {
@@ -319,7 +334,7 @@ func (r *Reconciler) entitlementAllowed(entitlement string) bool {
 
 // backoff doubles the wait after each consecutive failure, up to maxBackoff, but always
 // wakes up in time to remove the next binding that expires.
-func (r *Reconciler) backoff(key types.NamespacedName, bindings map[string]*rbacv1.RoleBinding, now time.Time) time.Duration {
+func (r *Reconciler) backoff(key types.NamespacedName, bindings map[types.NamespacedName]*rbacv1.RoleBinding, now time.Time) time.Duration {
 	r.mu.Lock()
 	r.failures[key]++
 	n := r.failures[key]
@@ -343,7 +358,7 @@ func (r *Reconciler) resetFailures(key types.NamespacedName) {
 }
 
 // nextSync returns the sooner of wait and the moment the next binding expires.
-func (r *Reconciler) nextSync(bindings map[string]*rbacv1.RoleBinding, now time.Time, wait time.Duration) time.Duration {
+func (r *Reconciler) nextSync(bindings map[types.NamespacedName]*rbacv1.RoleBinding, now time.Time, wait time.Duration) time.Duration {
 	for _, rb := range bindings {
 		if endsAt, ok := endsAt(rb); ok {
 			if until := endsAt.Add(-expiryMargin).Sub(now) + time.Second; until < wait {
@@ -359,17 +374,19 @@ func (r *Reconciler) nextSync(bindings map[string]*rbacv1.RoleBinding, now time.
 
 // ownedRoleBindings finds bindings by owner, not label, so one whose label has been
 // removed is still found, and replaced or removed.
-func (r *Reconciler) ownedRoleBindings(ctx context.Context, prb *rbacv1alpha1.PAMRoleBinding) (map[string]*rbacv1.RoleBinding, error) {
+func (r *Reconciler) ownedRoleBindings(ctx context.Context, prb *rbacv1alpha1.PAMRoleBinding) (map[types.NamespacedName]*rbacv1.RoleBinding, error) {
+	// Every namespace, so bindings left in a namespace that's since been removed from
+	// spec.namespaces are found and removed too.
 	list := &rbacv1.RoleBindingList{}
-	if err := r.List(ctx, list, client.InNamespace(prb.Namespace)); err != nil {
+	if err := r.List(ctx, list); err != nil {
 		return nil, fmt.Errorf("listing RoleBindings: %w", err)
 	}
 
-	owned := map[string]*rbacv1.RoleBinding{}
+	owned := map[types.NamespacedName]*rbacv1.RoleBinding{}
 	for i := range list.Items {
 		rb := &list.Items[i]
 		if metav1.IsControlledBy(rb, prb) {
-			owned[rb.Name] = rb
+			owned[client.ObjectKeyFromObject(rb)] = rb
 		}
 	}
 	return owned, nil
@@ -391,16 +408,16 @@ func (r *Reconciler) createRoleBinding(ctx context.Context, prb *rbacv1alpha1.PA
 				if err := r.deleteRoleBinding(ctx, prb, existing, ""); err != nil {
 					return err
 				}
-				return fmt.Errorf("RoleBinding %s didn't match its grant, so it was deleted to be recreated", rb.Name)
+				return fmt.Errorf("RoleBinding %s/%s didn't match its grant, so it was deleted to be recreated", rb.Namespace, rb.Name)
 			}
-			return fmt.Errorf("RoleBinding %s already exists and isn't owned by this PAMRoleBinding", rb.Name)
+			return fmt.Errorf("RoleBinding %s/%s already exists and isn't owned by this PAMRoleBinding", rb.Namespace, rb.Name)
 		}
-		return fmt.Errorf("creating RoleBinding %s: %w", rb.Name, err)
+		return fmt.Errorf("creating RoleBinding %s/%s: %w", rb.Namespace, rb.Name, err)
 	}
 
 	r.Recorder.Eventf(prb, corev1.EventTypeNormal, EventGrantBound,
-		"Bound %s to %s %s until %s (grant %s)", rb.Annotations[AnnotationRequester],
-		rb.RoleRef.Kind, rb.RoleRef.Name, rb.Annotations[AnnotationEndsAt], rb.Annotations[AnnotationGrantID])
+		"Bound %s to %s %s in %s until %s (grant %s)", rb.Annotations[AnnotationRequester],
+		rb.RoleRef.Kind, rb.RoleRef.Name, rb.Namespace, rb.Annotations[AnnotationEndsAt], rb.Annotations[AnnotationGrantID])
 	return nil
 }
 
@@ -409,19 +426,19 @@ func (r *Reconciler) deleteRoleBinding(ctx context.Context, prb *rbacv1alpha1.PA
 	// A UID precondition conflict means this binding is already gone, replaced by another
 	// of the same name.
 	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
-		return fmt.Errorf("deleting RoleBinding %s: %w", rb.Name, err)
+		return fmt.Errorf("deleting RoleBinding %s/%s: %w", rb.Namespace, rb.Name, err)
 	}
 
 	if reason != "" {
 		r.Recorder.Eventf(prb, corev1.EventTypeNormal, reason,
-			"Unbound %s (grant %s)", rb.Annotations[AnnotationRequester], rb.Annotations[AnnotationGrantID])
+			"Unbound %s in %s (grant %s)", rb.Annotations[AnnotationRequester], rb.Namespace, rb.Annotations[AnnotationGrantID])
 	}
 	return nil
 }
 
 func (r *Reconciler) setCondition(prb *rbacv1alpha1.PAMRoleBinding, status metav1.ConditionStatus, reason, message string) {
 	meta.SetStatusCondition(&prb.Status.Conditions, metav1.Condition{
-		Type:               rbacv1alpha1.PAMRoleBindingConditionSynced,
+		Type:               rbacv1alpha1.PAMRoleBindingConditionReady,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
@@ -429,10 +446,11 @@ func (r *Reconciler) setCondition(prb *rbacv1alpha1.PAMRoleBinding, status metav
 	})
 }
 
-// desiredBindings works out one RoleBinding per user with an active grant. A user with
+// desiredBindings works out one RoleBinding per user with an active grant, in each of the
+// PAMRoleBinding's namespaces. A user with
 // several grants gets one binding, for the grant that ends last. Grants whose requester
 // can't be bound are skipped, and returned as errors.
-func desiredBindings(prb *rbacv1alpha1.PAMRoleBinding, grants []Grant, now time.Time) (map[string]*rbacv1.RoleBinding, []error) {
+func desiredBindings(prb *rbacv1alpha1.PAMRoleBinding, grants []Grant, now time.Time) (map[types.NamespacedName]*rbacv1.RoleBinding, []error) {
 	var skipped []error
 	latest := map[string]Grant{}
 	for _, grant := range grants {
@@ -449,7 +467,7 @@ func desiredBindings(prb *rbacv1alpha1.PAMRoleBinding, grants []Grant, now time.
 		}
 	}
 
-	desired := map[string]*rbacv1.RoleBinding{}
+	desired := map[types.NamespacedName]*rbacv1.RoleBinding{}
 	for user, grant := range latest {
 		annotations := map[string]string{
 			AnnotationGrant:     grant.Name,
@@ -462,19 +480,21 @@ func desiredBindings(prb *rbacv1alpha1.PAMRoleBinding, grants []Grant, now time.
 		}
 
 		name := RoleBindingName(prb.Name, user)
-		desired[name] = &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        name,
-				Namespace:   prb.Namespace,
-				Labels:      map[string]string{LabelPAMRoleBinding: labelValue(prb.Name)},
-				Annotations: annotations,
-			},
-			RoleRef: prb.Spec.RoleRef,
-			Subjects: []rbacv1.Subject{{
-				APIGroup: rbacv1.GroupName,
-				Kind:     rbacv1.UserKind,
-				Name:     user,
-			}},
+		for _, namespace := range prb.Spec.Namespaces {
+			desired[types.NamespacedName{Namespace: namespace, Name: name}] = &rbacv1.RoleBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        name,
+					Namespace:   namespace,
+					Labels:      map[string]string{LabelPAMRoleBinding: labelValue(prb.Name)},
+					Annotations: copyMap(annotations),
+				},
+				RoleRef: prb.Spec.RoleRef,
+				Subjects: []rbacv1.Subject{{
+					APIGroup: rbacv1.GroupName,
+					Kind:     rbacv1.UserKind,
+					Name:     user,
+				}},
+			}
 		}
 	}
 	return desired, skipped
@@ -519,19 +539,45 @@ func expired(rb *rbacv1.RoleBinding, now time.Time) bool {
 	return !ok || !t.Add(-expiryMargin).After(now)
 }
 
-func activeGrantStatus(bindings map[string]*rbacv1.RoleBinding) []rbacv1alpha1.PAMGrant {
-	out := make([]rbacv1alpha1.PAMGrant, 0, len(bindings))
-	for name, rb := range bindings {
-		t, _ := endsAt(rb)
-		out = append(out, rbacv1alpha1.PAMGrant{
-			User:        rb.Annotations[AnnotationRequester],
-			Grant:       rb.Annotations[AnnotationGrant],
-			Approvers:   splitApprovers(rb.Annotations[AnnotationApprovers]),
-			EndsAt:      metav1.Time{Time: t},
-			RoleBinding: name,
-		})
+// activeGrantStatus summarises bindings as one entry per grant, with the namespaces it's
+// bound in.
+func activeGrantStatus(bindings map[types.NamespacedName]*rbacv1.RoleBinding) []rbacv1alpha1.PAMGrant {
+	byGrant := map[string]*rbacv1alpha1.PAMGrant{}
+	for key, rb := range bindings {
+		grant := rb.Annotations[AnnotationGrant]
+		entry, ok := byGrant[grant]
+		if !ok {
+			t, _ := endsAt(rb)
+			subject := rbacv1.Subject{}
+			if len(rb.Subjects) == 1 {
+				subject = rb.Subjects[0]
+			}
+			entry = &rbacv1alpha1.PAMGrant{
+				Subject:     subject,
+				Grant:       grant,
+				Approvers:   splitApprovers(rb.Annotations[AnnotationApprovers]),
+				EndsAt:      metav1.Time{Time: t},
+				RoleBinding: key.Name,
+			}
+			byGrant[grant] = entry
+		}
+		entry.Namespaces = append(entry.Namespaces, key.Namespace)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].User < out[j].User })
+
+	out := make([]rbacv1alpha1.PAMGrant, 0, len(byGrant))
+	for _, entry := range byGrant {
+		sort.Strings(entry.Namespaces)
+		out = append(out, *entry)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Subject.Name < out[j].Subject.Name })
+	return out
+}
+
+func copyMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
 	return out
 }
 
