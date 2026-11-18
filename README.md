@@ -28,9 +28,9 @@ new developers.
 > Note: In a GKE Kubernetes cluster this may soon be superseded by the [Google
 > Groups for GKE][gke-groups] functionality.
 
-- [`PAMRoleBinding`][sample-prb] gives a ClusterRole, in a list of namespaces, to everyone
-  holding an active grant on a Google Cloud [Privileged Access Manager][pam] (PAM)
-  entitlement, for just-in-time access. See [PAMRoleBinding](#pamrolebinding) below.
+- [`PAMRoleBinding`][sample-prb] gives a role in its namespace to everyone holding an
+  active grant on a Google Cloud [Privileged Access Manager][pam] (PAM) entitlement, for
+  just-in-time access. See [PAMRoleBinding](#pamrolebinding) below.
 
 [sample-drb]: config/samples/rbac_v1alpha1_directoryrolebinding.yaml
 [sample-prb]: config/samples/rbac_v1alpha1_pamrolebinding.yaml
@@ -47,26 +47,21 @@ user's next request, with no new login and no group membership to propagate.
 apiVersion: rbac.crd.gocardless.com/v1alpha1
 kind: PAMRoleBinding
 metadata:
-  name: my-app-operator
+  name: operator
+  namespace: my-app
 spec:
   entitlement: projects/my-project/locations/global/entitlements/my-app-operator
-  namespaces:
-    - my-app
-    - my-app-workers
   roleRef:
     apiGroup: rbac.authorization.k8s.io
     kind: ClusterRole
     name: my-operator-role
 ```
 
-`PAMRoleBinding` is cluster-scoped, so one grant can give access in several namespaces,
-and only those with cluster-level permissions can create one. `spec.namespaces` is an
-explicit list (there's no "all namespaces" or selector, so a new namespace never gains
-access by accident), and can change: bindings follow. `roleRef` must be a ClusterRole.
+To give one entitlement access in several namespaces, create a `PAMRoleBinding` in each.
 
 Every `--pam-refresh` (10s by default), rbac-manager lists the entitlement's active
-grants and keeps one `RoleBinding` per grant in each namespace, for the requester's
-email. Only people are bound: a requester must be a bare email or a `user:` principal.
+grants and keeps one `RoleBinding` per grant in the `PAMRoleBinding`'s namespace, for the
+requester's email. Only people are bound: a requester must be a bare email or a `user:` principal.
 Service accounts, groups and federated principals are skipped, with a `GrantSkipped`
 warning event. Bindings are named
 `pam-<PAMRoleBinding name>-<local part of their email>-<hash of the grant>`, e.g.
@@ -80,11 +75,11 @@ it's deleted with `--cascade=orphan`.
 - A binding is deleted when its grant ends, is withdrawn or is revoked, and at `ends-at`
   even if PAM can't be reached. A failed call to
   PAM never removes access early.
-- `status` lists the bound grants (subject, approvers, end time, and the namespaces each
-  is bound in) and when PAM was last listed. The `Ready` condition reports `EntitlementNotFound` (usually a typo in `spec.entitlement`),
+- `status` lists the bound grants (subject, approvers, end time) and when PAM was last
+  listed. The `Ready` condition reports `EntitlementNotFound` (usually a typo in `spec.entitlement`),
   `EntitlementNotAllowed`, `PAMUnreachable` or `RoleBindingFailed`, and events record
   each grant bound, expired or withdrawn.
-- Metrics, labelled by the PAMRoleBinding's `name`:
+- Metrics, labelled by the PAMRoleBinding's `namespace` and `name`:
   `theatre_rbac_pamrolebinding_last_sync_timestamp_seconds`,
   `theatre_rbac_pamrolebinding_entitlement_not_found` and
   `theatre_rbac_pamrolebinding_active_grants`. Alert on the first, so you hear if
