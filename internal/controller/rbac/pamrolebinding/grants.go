@@ -23,11 +23,13 @@ var ErrEntitlementNotFound = errors.New("entitlement not found")
 type Grant struct {
 	// Name is the full resource name of the grant.
 	Name string
-	// Requester is the email address of the user who requested the grant.
+	// Requester is the principal who requested the grant, as PAM reports it. Check it with
+	// BindableUser before binding it.
 	Requester string
-	// Approver is the email address of whoever approved the grant. Empty if it needed no
-	// approval.
-	Approver string
+	// Approvers are the email addresses of everyone who approved the grant, in the order
+	// they approved. PAM supports several approval levels, each needing one or more
+	// approvals. Empty if the grant needed no approval.
+	Approvers []string
 	// EndsAt is when the grant ends.
 	EndsAt time.Time
 }
@@ -110,13 +112,13 @@ func FromProto(pb *pampb.Grant) (Grant, bool) {
 	}
 
 	var activatedAt time.Time
-	var approver string
+	var approvers []string
 	for _, event := range pb.GetTimeline().GetEvents() {
 		switch {
 		case event.GetActivated() != nil:
 			activatedAt = event.GetEventTime().AsTime()
 		case event.GetApproved() != nil:
-			approver = event.GetApproved().GetActor()
+			approvers = append(approvers, normaliseEmail(event.GetApproved().GetActor()))
 		}
 	}
 
@@ -131,15 +133,44 @@ func FromProto(pb *pampb.Grant) (Grant, bool) {
 
 	return Grant{
 		Name:      pb.GetName(),
-		Requester: normaliseEmail(pb.GetRequester()),
-		Approver:  normaliseEmail(approver),
+		Requester: pb.GetRequester(),
+		Approvers: approvers,
 		EndsAt:    activatedAt.Add(pb.GetRequestedDuration().AsDuration()),
 	}, true
 }
 
-// normaliseEmail strips an IAM principal prefix, should PAM ever include one, and
-// lowercases the address, since Kubernetes compares usernames case-sensitively and
-// Google returns them lowercased.
+// normaliseEmail strips a "user:" prefix, should PAM ever include one, and lowercases the
+// address, since Kubernetes compares usernames case-sensitively and Google returns them
+// lowercased.
 func normaliseEmail(principal string) string {
-	return strings.ToLower(strings.TrimPrefix(principal, "user:"))
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(principal), "user:"))
+}
+
+// BindableUser returns the Kubernetes username to bind for a grant's requester, or an
+// error if it isn't a principal we can or should bind.
+//
+// GKE authenticates Google accounts by their email, so only a bare email or a "user:"
+// principal is bound. Groups can't request grants (the requester is always the person
+// who asked), and anything else, such as a workforce-federated "principal://..." or a
+// "serviceAccount:" principal, wouldn't match a Kubernetes user.
+//
+// Service accounts are refused too, even as bare emails, though GKE would accept them:
+// just-in-time access is for people, and automation should have standing access that's
+// reviewed in code rather than self-approved grants.
+func BindableUser(requester string) (string, error) {
+	raw := strings.TrimSpace(requester)
+	if prefix, _, ok := strings.Cut(raw, ":"); ok && prefix != "user" {
+		return "", fmt.Errorf("requester %q isn't a user", requester)
+	}
+
+	email := normaliseEmail(raw)
+	local, domain, ok := strings.Cut(email, "@")
+	if !ok || local == "" || domain == "" || strings.ContainsAny(email, " /:") {
+		return "", fmt.Errorf("requester %q isn't an email address", requester)
+	}
+	if strings.HasSuffix(domain, "gserviceaccount.com") {
+		return "", fmt.Errorf("requester %q is a service account", requester)
+	}
+
+	return email, nil
 }
