@@ -66,9 +66,16 @@ spec:
                 description: |-
                   Entitlement is the full resource name of a Google Cloud Privileged Access Manager
                   (PAM) entitlement. Every user with an active grant on it is bound to RoleRef in this
-                  namespace, for as long as the grant lasts.
-                pattern: ^(projects|folders|organizations)/[^/]+/locations/[^/]+/entitlements/[^/]+$
+                  namespace, for as long as the grant lasts. rbac-manager only honours entitlements in
+                  the Google Cloud project it runs in.
+
+                  It's immutable: pointing a PAMRoleBinding at another entitlement would keep the old
+                  one's bindings until they expire. Recreate the PAMRoleBinding instead.
+                pattern: ^projects/[^/]+/locations/[^/]+/entitlements/[^/]+$
                 type: string
+                x-kubernetes-validations:
+                - message: Entitlement is immutable
+                  rule: self == oldSelf
               roleRef:
                 description: RoleRef is the Role or ClusterRole to bind each grant
                   holder to.
@@ -105,10 +112,13 @@ spec:
                   description: PAMGrant is an active PAM grant that this PAMRoleBinding
                     has bound.
                   properties:
-                    approver:
-                      description: Approver is the email address of whoever approved
-                        the grant, if it needed approval.
-                      type: string
+                    approvers:
+                      description: |-
+                        Approvers are the email addresses of everyone who approved the grant, in order. Empty
+                        if it needed no approval.
+                      items:
+                        type: string
+                      type: array
                     endsAt:
                       description: |-
                         EndsAt is when the grant ends. The RoleBinding is removed then, even if PAM can't be
