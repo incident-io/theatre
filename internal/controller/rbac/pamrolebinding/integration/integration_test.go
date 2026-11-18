@@ -35,7 +35,7 @@ var _ = Describe("PAMRoleBinding", func() {
 	syncedCondition := func() *metav1.Condition {
 		got := &rbacv1alpha1.PAMRoleBinding{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(prb), got)).To(Succeed())
-		return meta.FindStatusCondition(got.Status.Conditions, rbacv1alpha1.PAMRoleBindingConditionSynced)
+		return meta.FindStatusCondition(got.Status.Conditions, rbacv1alpha1.PAMRoleBindingConditionReady)
 	}
 
 	syncedReason := func() string {
@@ -60,9 +60,11 @@ var _ = Describe("PAMRoleBinding", func() {
 		Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}})).To(Succeed())
 
 		prb = &rbacv1alpha1.PAMRoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "operator", Namespace: namespace},
+			// Cluster-scoped, so named after this spec's namespace to keep specs apart.
+			ObjectMeta: metav1.ObjectMeta{Name: namespace},
 			Spec: rbacv1alpha1.PAMRoleBindingSpec{
 				Entitlement: entitlement,
+				Namespaces:  []string{namespace},
 				RoleRef:     rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "edit"},
 			},
 		}
@@ -81,13 +83,13 @@ var _ = Describe("PAMRoleBinding", func() {
 			Eventually(roleBindings).Should(HaveLen(1))
 			rb := roleBindings()[0]
 
-			Expect(rb.Name).To(MatchRegexp(`^pam-operator-alice-smith-[0-9a-f]{8}$`))
+			Expect(rb.Name).To(MatchRegexp(`^pam-` + namespace + `-alice-smith-[0-9a-f]{8}$`))
 			Expect(rb.RoleRef).To(Equal(prb.Spec.RoleRef))
 			Expect(rb.Subjects).To(Equal([]rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: "User", Name: "alice.smith@example.com"}}))
 			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationGrant, alice.Name))
 			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationGrantID, alice.ID()))
 			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationApprovers, "bob@example.com"))
-			Expect(rb.Labels).To(HaveKeyWithValue(pamrolebinding.LabelPAMRoleBinding, "operator"))
+			Expect(rb.Labels).To(HaveKeyWithValue(pamrolebinding.LabelPAMRoleBinding, namespace))
 			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationRequester, "alice.smith@example.com"))
 			Expect(rb.Annotations).To(HaveKeyWithValue(pamrolebinding.AnnotationEndsAt, alice.EndsAt.UTC().Format(time.RFC3339)))
 			Expect(rb.OwnerReferences).To(HaveLen(1))
@@ -101,9 +103,10 @@ var _ = Describe("PAMRoleBinding", func() {
 				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(prb), got)).To(Succeed())
 				return got.Status.ActiveGrants
 			}).Should(ConsistOf(And(
-				HaveField("User", "alice.smith@example.com"),
+				HaveField("Subject", rbacv1.Subject{APIGroup: rbacv1.GroupName, Kind: "User", Name: "alice.smith@example.com"}),
+				HaveField("Namespaces", []string{namespace}),
 				HaveField("Approvers", []string{"bob@example.com"}),
-				HaveField("RoleBinding", HavePrefix("pam-operator-alice-smith-")),
+				HaveField("RoleBinding", HavePrefix("pam-"+namespace+"-alice-smith-")),
 			)))
 			Eventually(syncedCondition).Should(HaveField("Status", metav1.ConditionTrue))
 		})
@@ -161,7 +164,7 @@ var _ = Describe("PAMRoleBinding", func() {
 					return rbs
 				}
 				return nil
-			}).Should(ConsistOf(HaveField("Labels", HaveKeyWithValue(pamrolebinding.LabelPAMRoleBinding, "operator"))))
+			}).Should(ConsistOf(HaveField("Labels", HaveKeyWithValue(pamrolebinding.LabelPAMRoleBinding, namespace))))
 		})
 
 		It("still removes a binding whose label has been removed, when its grant is withdrawn", func() {
@@ -220,23 +223,98 @@ var _ = Describe("PAMRoleBinding", func() {
 
 		Eventually(roleBindings).Should(ConsistOf(HaveField("Subjects", ConsistOf(HaveField("Name", "grace@example.com")))))
 		Eventually(func() []string {
+			// Events about a cluster-scoped object are recorded in the default namespace.
 			events := &corev1.EventList{}
-			Expect(k8sClient.List(ctx, events, client.InNamespace(namespace))).To(Succeed())
+			Expect(k8sClient.List(ctx, events)).To(Succeed())
 			reasons := []string{}
 			for _, e := range events.Items {
-				reasons = append(reasons, e.Reason)
+				if e.InvolvedObject.Kind == "PAMRoleBinding" && e.InvolvedObject.Name == prb.Name {
+					reasons = append(reasons, e.Reason)
+				}
 			}
 			return reasons
 		}).Should(ContainElement(pamrolebinding.EventGrantSkipped))
 	})
 
 	It("binds users for a PAMRoleBinding whose name is too long for a label", func() {
-		prb.Name = strings.Repeat("a", 70)
+		prb.Name = namespace + strings.Repeat("a", 70-len(namespace))
 		grants.SetGrants(entitlement, grant("heidi@example.com", "", time.Hour))
 		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
 
-		Eventually(roleBindings).Should(ConsistOf(HaveField("Labels", HaveKeyWithValue(pamrolebinding.LabelPAMRoleBinding, strings.Repeat("a", 63)))))
+		Eventually(roleBindings).Should(ConsistOf(HaveField("Labels", HaveKeyWithValue(pamrolebinding.LabelPAMRoleBinding, prb.Name[:63]))))
 		Eventually(syncedReason).Should(Equal(rbacv1alpha1.PAMRoleBindingReasonSynced))
+	})
+
+	Context("with several namespaces", func() {
+		var other string
+
+		roleBindingsIn := func(ns string) func() []rbacv1.RoleBinding {
+			return func() []rbacv1.RoleBinding {
+				list := &rbacv1.RoleBindingList{}
+				Expect(k8sClient.List(ctx, list, client.InNamespace(ns))).To(Succeed())
+				return list.Items
+			}
+		}
+
+		BeforeEach(func() {
+			other = namespace + "-other"
+			Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: other}})).To(Succeed())
+			prb.Spec.Namespaces = []string{namespace, other}
+			grants.SetGrants(entitlement, grant("judy@example.com", "", time.Hour))
+			Expect(k8sClient.Create(ctx, prb)).To(Succeed())
+		})
+
+		It("binds each grant holder in every namespace, with one status entry per grant", func() {
+			Eventually(roleBindings).Should(HaveLen(1))
+			Eventually(roleBindingsIn(other)).Should(HaveLen(1))
+			Expect(roleBindingsIn(other)()[0].Name).To(Equal(roleBindings()[0].Name))
+
+			Eventually(func() []rbacv1alpha1.PAMGrant {
+				got := &rbacv1alpha1.PAMRoleBinding{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(prb), got)).To(Succeed())
+				return got.Status.ActiveGrants
+			}).Should(ConsistOf(HaveField("Namespaces", ConsistOf(namespace, other))))
+		})
+
+		It("removes bindings from a namespace taken off the list, and keeps the rest", func() {
+			Eventually(roleBindingsIn(other)).Should(HaveLen(1))
+
+			Eventually(func() error {
+				got := &rbacv1alpha1.PAMRoleBinding{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(prb), got)).To(Succeed())
+				got.Spec.Namespaces = []string{namespace}
+				return k8sClient.Update(ctx, got)
+			}).Should(Succeed())
+
+			Eventually(roleBindingsIn(other)).Should(BeEmpty())
+			Consistently(roleBindings, time.Second).Should(HaveLen(1))
+		})
+
+		It("deletes bindings in every namespace when it's deleted", func() {
+			Eventually(roleBindingsIn(other)).Should(HaveLen(1))
+			Expect(k8sClient.Delete(ctx, prb)).To(Succeed())
+			Eventually(roleBindings).Should(BeEmpty())
+			Eventually(roleBindingsIn(other)).Should(BeEmpty())
+		})
+	})
+
+	It("still binds the namespaces that exist when one doesn't", func() {
+		prb.Spec.Namespaces = []string{namespace, namespace + "-missing"}
+		grants.SetGrants(entitlement, grant("kim@example.com", "", time.Hour))
+		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
+
+		Eventually(roleBindings).Should(HaveLen(1))
+		Eventually(syncedReason).Should(Equal(rbacv1alpha1.PAMRoleBindingReasonRoleBindingFailed))
+	})
+
+	It("rejects a namespaced Role", func() {
+		prb.Spec.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: "edit"}
+		Expect(k8sClient.Create(ctx, prb)).To(MatchError(ContainSubstring("RoleRef must be a ClusterRole")))
+	})
+
+	It("rejects an empty namespace list", func() {
+		prb.Spec.Namespaces = nil
+		Expect(k8sClient.Create(ctx, prb)).NotTo(Succeed())
 	})
 
 	It("reports an entitlement that doesn't exist", func() {
@@ -268,7 +346,7 @@ var _ = Describe("PAMRoleBinding", func() {
 	})
 
 	It("refuses to take over a RoleBinding it doesn't own", func() {
-		name := pamrolebinding.RoleBindingName("operator", "dave@example.com")
+		name := pamrolebinding.RoleBindingName(prb.Name, "dave@example.com")
 		Expect(k8sClient.Create(ctx, &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "view"},
