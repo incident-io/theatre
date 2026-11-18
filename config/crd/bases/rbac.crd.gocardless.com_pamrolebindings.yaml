@@ -40,13 +40,9 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          PAMRoleBinding binds a ClusterRole, in each of a list of namespaces, to every principal
-          holding an active grant on a Google Cloud Privileged Access Manager (PAM) entitlement.
-          PAM handles requests, approvals and expiry; theatre keeps one RoleBinding per grant
-          holder per namespace, and removes them when the grant ends.
-
-          It's cluster-scoped, so it can own RoleBindings in several namespaces, and so only
-          those with cluster-level permissions can create one.
+          PAMRoleBinding binds a ClusterRole, in each of a list of namespaces, to everyone holding
+          an active grant on a Google Cloud Privileged Access Manager (PAM) entitlement, until
+          their grant ends.
         properties:
           apiVersion:
             description: |-
@@ -66,17 +62,12 @@ spec:
           metadata:
             type: object
           spec:
-            description: PAMRoleBindingSpec defines the desired state of PAMRoleBinding
             properties:
               entitlement:
                 description: |-
-                  Entitlement is the full resource name of a Google Cloud Privileged Access Manager
-                  (PAM) entitlement. Every principal with an active grant on it is bound to RoleRef in
-                  each of Namespaces, for as long as the grant lasts. rbac-manager only honours
-                  entitlements in the Google Cloud project it runs in.
-
-                  It's immutable: pointing a PAMRoleBinding at another entitlement would keep the old
-                  one's bindings until they expire. Recreate the PAMRoleBinding instead.
+                  Entitlement is the full resource name of a PAM entitlement, e.g.
+                  projects/my-project/locations/global/entitlements/my-entitlement. It must be in the
+                  Google Cloud project rbac-manager runs in.
                 pattern: ^projects/[^/]+/locations/[^/]+/entitlements/[^/]+$
                 type: string
                 x-kubernetes-validations:
@@ -84,9 +75,8 @@ spec:
                   rule: self == oldSelf
               namespaces:
                 description: |-
-                  Namespaces are where each grant holder is bound. There's deliberately no way to
-                  select all namespaces, or namespaces by label, so a new namespace never gains access
-                  by accident. Namespaces can be added and removed: bindings follow.
+                  Namespaces are where each grant holder is bound. They're listed explicitly, so a new
+                  namespace never gains access by accident.
                 items:
                   maxLength: 63
                   pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -96,9 +86,7 @@ spec:
                 type: array
                 x-kubernetes-list-type: set
               roleRef:
-                description: |-
-                  RoleRef is the ClusterRole to bind each grant holder to, in each namespace. It must
-                  be a ClusterRole, because a Role only exists in one namespace.
+                description: RoleRef is the ClusterRole bound in each namespace.
                 properties:
                   apiGroup:
                     description: APIGroup is the group for the resource being referenced
@@ -126,19 +114,15 @@ spec:
             - roleRef
             type: object
           status:
-            description: PAMRoleBindingStatus defines the observed state of PAMRoleBinding
             properties:
               activeGrants:
                 description: ActiveGrants are the grants currently bound, one per
                   subject.
                 items:
-                  description: PAMGrant is an active PAM grant that this PAMRoleBinding
-                    has bound.
                   properties:
                     approvers:
-                      description: |-
-                        Approvers are everyone who approved the grant, in order. Empty if it needed no
-                        approval.
+                      description: Approvers are everyone who approved the grant,
+                        in the order they approved.
                       items:
                         type: string
                       type: array
@@ -152,20 +136,20 @@ spec:
                       description: Grant is the full resource name of the PAM grant.
                       type: string
                     namespaces:
-                      description: Namespaces are where the subject is currently bound.
+                      description: |-
+                        Namespaces are where the subject is currently bound. This can fall short of
+                        spec.namespaces when a binding fails.
                       items:
                         type: string
                       type: array
                       x-kubernetes-list-type: set
                     roleBinding:
                       description: |-
-                        RoleBinding is the name of the RoleBinding that binds the subject. It's the same in
-                        every namespace.
+                        RoleBinding is the name of the subject's RoleBinding, which is the same in every
+                        namespace.
                       type: string
                     subject:
-                      description: |-
-                        Subject is who the grant is bound to: the grant's requester, as a RoleBinding
-                        subject.
+                      description: Subject is the grant's requester.
                       properties:
                         apiGroup:
                           description: |-
@@ -202,8 +186,6 @@ spec:
                 - grant
                 x-kubernetes-list-type: map
               conditions:
-                description: Conditions describe the last sync with PAM. Ready is
-                  true when it succeeded.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -268,8 +250,6 @@ spec:
                 format: date-time
                 type: string
               observedGeneration:
-                description: ObservedGeneration is the spec generation the status
-                  reflects.
                 format: int64
                 type: integer
             type: object
