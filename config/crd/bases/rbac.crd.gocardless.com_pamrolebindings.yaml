@@ -116,8 +116,9 @@ spec:
           status:
             properties:
               activeGrants:
-                description: ActiveGrants are the grants currently bound, one per
-                  subject.
+                description: |-
+                  ActiveGrants are the grants currently bound. A subject with several grants appears
+                  once for each.
                 items:
                   properties:
                     approvers:
@@ -145,7 +146,7 @@ spec:
                       x-kubernetes-list-type: set
                     roleBinding:
                       description: |-
-                        RoleBinding is the name of the subject's RoleBinding, which is the same in every
+                        RoleBinding is the name of the grant's RoleBinding, which is the same in every
                         namespace.
                       type: string
                     subject:

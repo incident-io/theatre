@@ -53,7 +53,7 @@ type PAMGrant struct {
 	// EndsAt is when the grant ends. The RoleBindings are removed then, even if PAM can't
 	// be reached.
 	EndsAt metav1.Time `json:"endsAt"`
-	// RoleBinding is the name of the subject's RoleBinding, which is the same in every
+	// RoleBinding is the name of the grant's RoleBinding, which is the same in every
 	// namespace.
 	RoleBinding string `json:"roleBinding"`
 	// Namespaces are where the subject is currently bound. This can fall short of
@@ -76,7 +76,8 @@ type PAMRoleBindingStatus struct {
 	// +optional
 	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
 
-	// ActiveGrants are the grants currently bound, one per subject.
+	// ActiveGrants are the grants currently bound. A subject with several grants appears
+	// once for each.
 	// +optional
 	// +listType=map
 	// +listMapKey=grant
