@@ -5,7 +5,6 @@ import (
 	"sync"
 )
 
-// FakeGrantLister is an in-memory GrantLister for tests.
 type FakeGrantLister struct {
 	mu     sync.Mutex
 	grants map[string][]Grant
@@ -14,8 +13,8 @@ type FakeGrantLister struct {
 	during func()
 }
 
-// SetDuringList sets a function to run inside every ListActiveGrants call, e.g. to move
-// a fake clock forward as if PAM were slow to answer. nil clears it.
+// SetDuringList runs fn inside every ListActiveGrants call, e.g. to move a fake clock on
+// as if PAM were slow to answer.
 func (f *FakeGrantLister) SetDuringList(fn func()) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -26,7 +25,7 @@ func NewFakeGrantLister() *FakeGrantLister {
 	return &FakeGrantLister{grants: map[string][]Grant{}, errs: map[string]error{}, calls: map[string]int{}}
 }
 
-// SetGrants replaces the active grants on an entitlement, and clears any error.
+// SetGrants also clears any error set for the entitlement.
 func (f *FakeGrantLister) SetGrants(entitlement string, grants ...Grant) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -34,14 +33,12 @@ func (f *FakeGrantLister) SetGrants(entitlement string, grants ...Grant) {
 	delete(f.errs, entitlement)
 }
 
-// SetError makes listing an entitlement's grants fail.
 func (f *FakeGrantLister) SetError(entitlement string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.errs[entitlement] = err
 }
 
-// Calls returns how many times an entitlement's grants have been listed.
 func (f *FakeGrantLister) Calls(entitlement string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

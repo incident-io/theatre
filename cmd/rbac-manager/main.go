@@ -40,9 +40,8 @@ var (
 	// it can turn it off, and then drop that permission from rbac-manager's ClusterRole.
 	directoryRoleBindingEnabled = app.Flag("directory-role-binding", "Run the DirectoryRoleBinding controller").Default("true").Bool()
 
-	// PAMRoleBinding: binds roles to holders of Google Cloud PAM grants. Uses Application
-	// Default Credentials, which need privilegedaccessmanager.grants.list on the project
-	// rbac-manager runs in. Only entitlements in that project are honoured.
+	// Uses Application Default Credentials, which need privilegedaccessmanager.grants.list
+	// on the project rbac-manager runs in.
 	pamEnabled = app.Flag("pam", "Run the PAMRoleBinding controller").Default("false").Bool()
 	pamRefresh = app.Flag("pam-refresh", "How often each PAMRoleBinding is synced with PAM").Default("10s").Duration()
 
@@ -119,9 +118,7 @@ func main() {
 	}
 
 	if *pamEnabled {
-		// Only entitlements in our own project are honoured: anyone who can create a
-		// PAMRoleBinding could otherwise name an entitlement in a project they control and
-		// grant themselves its role. Refuse to start rather than allow any project.
+		// Refuse to start rather than honour entitlements in any project.
 		projects, err := ownProject(ctx)
 		if err != nil {
 			app.Fatalf("failed to find this cluster's Google Cloud project, which PAMRoleBindings' entitlements must be in: %v", err)
@@ -205,8 +202,7 @@ func createGoogleDirectory(ctx context.Context, subject string) (*directoryv1.Se
 	return directoryv1.NewService(ctx, option.WithTokenSource(ts))
 }
 
-// ownProject returns the ID and number of the Google Cloud project we run in, from the
-// metadata server. Entitlement names can use either.
+// ownProject returns both the project ID and number, as entitlement names can use either.
 func ownProject(ctx context.Context) ([]string, error) {
 	id, err := metadata.ProjectIDWithContext(ctx)
 	if err != nil {

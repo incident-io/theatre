@@ -29,29 +29,24 @@ import (
 )
 
 const (
-	// LabelPAMRoleBinding names the PAMRoleBinding that made a RoleBinding (cut to 63
-	// characters). Ownership is decided by the owner reference, never by this label, which
-	// anyone who can edit a RoleBinding could change. The label is for finding bindings
-	// once the owner reference is gone (`kubectl delete --cascade=orphan` strips it before
-	// the finalizer runs), and for people: `kubectl get rolebindings -A -l <label>=<name>`.
+	// LabelPAMRoleBinding names the PAMRoleBinding that made a RoleBinding, cut to 63
+	// characters. Never use it to decide ownership: anyone who can edit a RoleBinding can
+	// change it. The owner reference decides.
 	LabelPAMRoleBinding = "rbac.crd.gocardless.com/pam-role-binding"
 
-	// Finalizer makes sure a PAMRoleBinding's RoleBindings are deleted with it, even if it's
-	// deleted with --cascade=orphan, which would otherwise leave them in place for good.
+	// Finalizer deletes a PAMRoleBinding's RoleBindings with it, including after
+	// `--cascade=orphan`, which would otherwise leave them in place for good.
 	Finalizer = "rbac.crd.gocardless.com/pam-role-binding"
 
-	annotationPrefix = "pam.rbac.crd.gocardless.com/"
-	// AnnotationGrant is the grant's full resource name, for `gcloud pam grants describe`.
-	AnnotationGrant = annotationPrefix + "grant"
-	// AnnotationGrantID is the grant's ID, for searching audit logs.
+	annotationPrefix  = "pam.rbac.crd.gocardless.com/"
+	AnnotationGrant   = annotationPrefix + "grant"
 	AnnotationGrantID = annotationPrefix + "grant-id"
-	// AnnotationApprovers lists everyone who approved the grant, comma-separated in the
-	// order they approved. Absent if no approval was needed.
+	// AnnotationApprovers is comma-separated, in the order they approved.
 	AnnotationApprovers = annotationPrefix + "approvers"
-	// AnnotationRequester is the user's email. Labels can't hold an '@'.
+	// AnnotationRequester holds the user's email, which a label can't (no '@').
 	AnnotationRequester = annotationPrefix + "requester"
-	// AnnotationEndsAt is when the grant ends, in RFC 3339. The controller deletes the
-	// RoleBinding at this time even if PAM can't be reached.
+	// AnnotationEndsAt is RFC 3339. Expiry is enforced from this, not from PAM, so it works
+	// while PAM is unreachable.
 	AnnotationEndsAt = annotationPrefix + "ends-at"
 
 	EventGrantBound     = "GrantBound"
@@ -59,8 +54,8 @@ const (
 	EventGrantWithdrawn = "GrantWithdrawn"
 	EventSyncFailed     = "SyncFailed"
 	EventGrantSkipped   = "GrantSkipped"
-	// EventNamespaceRemoved is recorded when a namespace is taken out of spec.namespaces,
-	// and the bindings there are removed while the grants carry on elsewhere.
+	// EventNamespaceRemoved is for bindings removed from a namespace that's left
+	// spec.namespaces while the grant is still active elsewhere.
 	EventNamespaceRemoved = "NamespaceRemoved"
 
 	// maxBackoff caps how long we wait between attempts while PAM is failing. Expiry is
@@ -76,29 +71,24 @@ const (
 	expiryMargin = 10 * time.Second
 )
 
-// Reconciler keeps one RoleBinding per user with an active grant on a PAMRoleBinding's
-// entitlement.
-//
-// It needs create, delete, get, list and watch on RoleBindings, and bind on the roles it
-// hands out. It never updates a RoleBinding: one that's wrong is deleted and recreated.
+// Reconciler never updates a RoleBinding: one that's wrong is deleted and recreated. So it
+// needs only create, delete, get, list and watch on RoleBindings, plus bind on the roles
+// it hands out.
 type Reconciler struct {
 	client.Client
-	// APIReader reads straight from the API server, bypassing the cache, to check whether a
-	// RoleBinding that already exists is ours.
-	APIReader client.Reader
-	Log       logr.Logger
-	Scheme    *runtime.Scheme
-	Recorder  record.EventRecorder
-	Grants    GrantLister
-	// RefreshInterval is how often each PAMRoleBinding is synced with PAM.
+	// APIReader bypasses the cache, to tell a binding we've only just created from one that
+	// isn't ours.
+	APIReader       client.Reader
+	Log             logr.Logger
+	Scheme          *runtime.Scheme
+	Recorder        record.EventRecorder
+	Grants          GrantLister
 	RefreshInterval time.Duration
-	// Projects are the Google Cloud project ID and number that rbac-manager runs in. Only
-	// entitlements in that project are honoured: anyone who can create a PAMRoleBinding
-	// could otherwise point it at an entitlement in a project of their own. If empty, no
-	// entitlement is allowed.
+	// Projects are the IDs and numbers of the only projects whose entitlements are
+	// honoured. Otherwise anyone who can create a PAMRoleBinding could point it at an
+	// entitlement in a project they control. Empty allows none.
 	Projects []string
-	// Now is overridable for tests.
-	Now func() time.Time
+	Now      func() time.Time
 
 	mu       sync.Mutex
 	failures map[types.NamespacedName]int
@@ -121,7 +111,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			predicate.AnnotationChangedPredicate{},
 			predicate.LabelChangedPredicate{},
 		))).
-		// Recreate a binding promptly if someone deletes it while its grant is active.
+		// So a binding deleted while its grant is active is recreated straight away.
 		Owns(&rbacv1.RoleBinding{}).
 		// Several workers, so one slow call to PAM can't hold up other bindings' expiry.
 		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
@@ -205,7 +195,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		r.Recorder.Event(prb, corev1.EventTypeWarning, EventGrantSkipped, err.Error())
 	}
 
-	// Names of bindings whose subject still has an active grant, in any namespace.
 	stillGranted := map[string]bool{}
 	for key := range desired {
 		stillGranted[key.Name] = true
@@ -264,9 +253,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	return ctrl.Result{RequeueAfter: r.nextSync(owned, now, r.RefreshInterval)}, nil
 }
 
-// syncFailed handles a sync we couldn't finish. A failed list from PAM says nothing about
-// which grants are active, so it never removes access early: expired bindings have
-// already been removed by the time we get here.
+// syncFailed never removes access: a failed list from PAM says nothing about which grants
+// are active. Expired bindings have already been removed before PAM was called.
 func (r *Reconciler) syncFailed(ctx context.Context, logger logr.Logger, prb *rbacv1alpha1.PAMRoleBinding, remaining map[types.NamespacedName]*rbacv1.RoleBinding, now time.Time, reason string, err error) (ctrl.Result, error) {
 	logger.Error(err, "failed to sync with PAM", "reason", reason)
 
@@ -285,9 +273,8 @@ func (r *Reconciler) syncFailed(ctx context.Context, logger logr.Logger, prb *rb
 	return ctrl.Result{RequeueAfter: r.backoff(types.NamespacedName{Namespace: prb.Namespace, Name: prb.Name}, remaining, now)}, nil
 }
 
-// updateStatus writes status, logging rather than returning a failure: returning an error
-// would swap our expiry-aware RequeueAfter for the rate limiter's backoff, which can run to
-// many minutes.
+// updateStatus logs failures rather than returning them: an error would replace the
+// expiry-aware RequeueAfter with the rate limiter's backoff, which can run to many minutes.
 func (r *Reconciler) updateStatus(ctx context.Context, logger logr.Logger, prb *rbacv1alpha1.PAMRoleBinding) {
 	prb.Status.ObservedGeneration = prb.Generation
 	if err := r.Status().Update(ctx, prb); err != nil && !apierrors.IsConflict(err) {
@@ -295,7 +282,6 @@ func (r *Reconciler) updateStatus(ctx context.Context, logger logr.Logger, prb *
 	}
 }
 
-// finalize deletes every RoleBinding this PAMRoleBinding made, then lets it go.
 func (r *Reconciler) finalize(ctx context.Context, prb *rbacv1alpha1.PAMRoleBinding) error {
 	if !controllerutil.ContainsFinalizer(prb, Finalizer) {
 		return nil
@@ -309,8 +295,8 @@ func (r *Reconciler) finalize(ctx context.Context, prb *rbacv1alpha1.PAMRoleBind
 	}
 	for i := range list.Items {
 		rb := &list.Items[i]
-		// Ours, or ownerless but labelled as ours: `--cascade=orphan` strips the owner
-		// references before we get here, so the label is all that's left to go on.
+		// Ownerless bindings carrying our label are ours too: `--cascade=orphan` strips the
+		// owner references before the finalizer runs.
 		owner := metav1.GetControllerOf(rb)
 		ours := owner != nil && owner.UID == prb.UID
 		orphaned := owner == nil && rb.Labels[LabelPAMRoleBinding] == labelValue(prb.Name)
@@ -335,8 +321,7 @@ func (r *Reconciler) entitlementAllowed(entitlement string) bool {
 	return false
 }
 
-// backoff doubles the wait after each consecutive failure, up to maxBackoff, but always
-// wakes up in time to remove the next binding that expires.
+// backoff never waits past the next binding's expiry.
 func (r *Reconciler) backoff(key types.NamespacedName, bindings map[types.NamespacedName]*rbacv1.RoleBinding, now time.Time) time.Duration {
 	r.mu.Lock()
 	r.failures[key]++
@@ -360,7 +345,6 @@ func (r *Reconciler) resetFailures(key types.NamespacedName) {
 	delete(r.failures, key)
 }
 
-// nextSync returns the sooner of wait and the moment the next binding expires.
 func (r *Reconciler) nextSync(bindings map[types.NamespacedName]*rbacv1.RoleBinding, now time.Time, wait time.Duration) time.Duration {
 	for _, rb := range bindings {
 		if endsAt, ok := endsAt(rb); ok {
@@ -375,11 +359,9 @@ func (r *Reconciler) nextSync(bindings map[types.NamespacedName]*rbacv1.RoleBind
 	return wait
 }
 
-// ownedRoleBindings finds bindings by owner, not label, so one whose label has been
-// removed is still found, and replaced or removed.
 func (r *Reconciler) ownedRoleBindings(ctx context.Context, prb *rbacv1alpha1.PAMRoleBinding) (map[types.NamespacedName]*rbacv1.RoleBinding, error) {
-	// Every namespace, so bindings left in a namespace that's since been removed from
-	// spec.namespaces are found and removed too.
+	// Every namespace, not just spec.namespaces, to catch bindings in namespaces that have
+	// since been removed from it.
 	list := &rbacv1.RoleBindingList{}
 	if err := r.List(ctx, list); err != nil {
 		return nil, fmt.Errorf("listing RoleBindings: %w", err)
@@ -407,7 +389,7 @@ func (r *Reconciler) createRoleBinding(ctx context.Context, prb *rbacv1alpha1.PA
 				if matches(existing, rb) {
 					return nil
 				}
-				// Ours, but changed since (e.g. its label removed): replace it next sync.
+				// Ours, but edited since: replace it.
 				if err := r.deleteRoleBinding(ctx, prb, existing, ""); err != nil {
 					return err
 				}
@@ -449,10 +431,8 @@ func (r *Reconciler) setCondition(prb *rbacv1alpha1.PAMRoleBinding, status metav
 	})
 }
 
-// desiredBindings works out one RoleBinding per user with an active grant, in each of the
-// PAMRoleBinding's namespaces. A user with
-// several grants gets one binding, for the grant that ends last. Grants whose requester
-// can't be bound are skipped, and returned as errors.
+// desiredBindings gives a user with several grants one binding, for the grant that ends
+// last. Grants whose requester can't be bound are returned as errors.
 func desiredBindings(prb *rbacv1alpha1.PAMRoleBinding, grants []Grant, now time.Time) (map[types.NamespacedName]*rbacv1.RoleBinding, []error) {
 	var skipped []error
 	latest := map[string]Grant{}
@@ -503,9 +483,9 @@ func desiredBindings(prb *rbacv1alpha1.PAMRoleBinding, grants []Grant, now time.
 	return desired, skipped
 }
 
-// labelValue fits a PAMRoleBinding's name into a label value, which is capped at 63
-// characters and must end in a letter or digit. Ownership is checked by owner reference,
-// so two names that share their first 63 characters can't mix up each other's bindings.
+// labelValue fits a name into a label value: at most 63 characters, ending in a letter or
+// digit. Names sharing their first 63 characters get the same label, which is safe only
+// because ownership is decided by owner reference.
 func labelValue(name string) string {
 	if len(name) > 63 {
 		name = name[:63]
@@ -513,7 +493,6 @@ func labelValue(name string) string {
 	return strings.TrimRight(name, "-.")
 }
 
-// matches reports whether an existing binding already reflects the desired grant.
 func matches(existing, desired *rbacv1.RoleBinding) bool {
 	if existing.RoleRef != desired.RoleRef || len(existing.Subjects) != 1 || existing.Subjects[0] != desired.Subjects[0] {
 		return false
@@ -534,16 +513,13 @@ func endsAt(rb *rbacv1.RoleBinding) (time.Time, bool) {
 	return t, err == nil
 }
 
-// expired reports whether a binding's grant has ended, or is within expiryMargin of
-// ending. A binding we can't read an end time from is treated as expired, so it can never
-// outstay its grant.
+// expired treats a binding without a readable end time as expired, so it can't outstay
+// its grant.
 func expired(rb *rbacv1.RoleBinding, now time.Time) bool {
 	t, ok := endsAt(rb)
 	return !ok || !t.Add(-expiryMargin).After(now)
 }
 
-// activeGrantStatus summarises bindings as one entry per grant, with the namespaces it's
-// bound in.
 func activeGrantStatus(bindings map[types.NamespacedName]*rbacv1.RoleBinding) []rbacv1alpha1.PAMGrant {
 	byGrant := map[string]*rbacv1alpha1.PAMGrant{}
 	for key, rb := range bindings {
