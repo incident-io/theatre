@@ -29,8 +29,11 @@ import (
 )
 
 const (
-	// LabelPAMRoleBinding names the PAMRoleBinding that owns a RoleBinding, so the
-	// controller can find its own bindings with a label selector.
+	// LabelPAMRoleBinding names the PAMRoleBinding that made a RoleBinding (cut to 63
+	// characters). Ownership is decided by the owner reference, never by this label, which
+	// anyone who can edit a RoleBinding could change. The label is for finding bindings
+	// once the owner reference is gone (`kubectl delete --cascade=orphan` strips it before
+	// the finalizer runs), and for people: `kubectl get rolebindings -A -l <label>=<name>`.
 	LabelPAMRoleBinding = "rbac.crd.gocardless.com/pam-role-binding"
 
 	// Finalizer makes sure a PAMRoleBinding's RoleBindings are deleted with it, even if it's
