@@ -176,21 +176,22 @@ var _ = Describe("PAMRoleBinding", func() {
 			Eventually(roleBindings).Should(BeEmpty())
 		})
 
-		It("moves a user to their newer grant", func() {
+		It("gives a second grant for the same user its own binding, which outlives the first", func() {
 			Eventually(roleBindings).Should(HaveLen(1))
-			newer := grant("alice.smith@example.com", "", 3*time.Hour)
-			grants.SetGrants(entitlement, alice, newer)
+			second := grant("alice.smith@example.com", "", 3*time.Hour)
+			grants.SetGrants(entitlement, alice, second)
 
-			Eventually(func() map[string]string {
-				rbs := roleBindings()
-				if len(rbs) != 1 {
-					return nil
+			grantsBound := func() []string {
+				out := []string{}
+				for _, rb := range roleBindings() {
+					out = append(out, rb.Annotations[pamrolebinding.AnnotationGrant])
 				}
-				return rbs[0].Annotations
-			}).Should(And(
-				HaveKeyWithValue(pamrolebinding.AnnotationGrant, newer.Name),
-				Not(HaveKey(pamrolebinding.AnnotationApprovers)),
-			))
+				return out
+			}
+			Eventually(grantsBound).Should(ConsistOf(alice.Name, second.Name))
+
+			clock.Advance(2 * time.Hour)
+			Eventually(grantsBound).Should(ConsistOf(second.Name))
 		})
 	})
 
@@ -346,14 +347,15 @@ var _ = Describe("PAMRoleBinding", func() {
 	})
 
 	It("refuses to take over a RoleBinding it doesn't own", func() {
-		name := pamrolebinding.RoleBindingName(prb.Name, "dave@example.com")
+		dave := grant("dave@example.com", "", time.Hour)
+		name := pamrolebinding.RoleBindingName(prb.Name, "dave@example.com", dave.Name)
 		Expect(k8sClient.Create(ctx, &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "view"},
 			Subjects:   []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: "User", Name: "someone@example.com"}},
 		})).To(Succeed())
 
-		grants.SetGrants(entitlement, grant("dave@example.com", "", time.Hour))
+		grants.SetGrants(entitlement, dave)
 		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
 
 		Eventually(syncedReason).Should(Equal(rbacv1alpha1.PAMRoleBindingReasonRoleBindingFailed))

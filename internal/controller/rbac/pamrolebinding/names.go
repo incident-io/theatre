@@ -10,10 +10,10 @@ import (
 var invalidNameChars = regexp.MustCompile(`[^a-z0-9-]+`)
 
 // RoleBindingName is pam-<binding>-<local part of the email>-<hash>. The hash covers the
-// binding's name and the full email, so a name depends on nothing else, and two users or
-// bindings can't collide even where their names run together.
-func RoleBindingName(bindingName, user string) string {
-	sum := sha256.Sum256([]byte(bindingName + "\x00" + user))
+// binding's name and the grant's, so each grant gets its own name, which no other binding
+// or grant can collide with even where their names run together.
+func RoleBindingName(bindingName, user, grant string) string {
+	sum := sha256.Sum256([]byte(bindingName + "\x00" + grant))
 	suffix := "-" + hex.EncodeToString(sum[:])[:8]
 
 	name := "pam-" + bindingName + "-" + localPart(user)

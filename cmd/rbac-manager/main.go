@@ -118,7 +118,9 @@ func main() {
 	}
 
 	if *pamEnabled {
-		// Refuse to start rather than honour entitlements in any project.
+		// Only honour entitlements in our own project: anyone who can create a PAMRoleBinding
+		// could otherwise point it at an entitlement in a project they control. Refuse to
+		// start rather than honour any project.
 		projects, err := ownProject(ctx)
 		if err != nil {
 			app.Fatalf("failed to find this cluster's Google Cloud project, which PAMRoleBindings' entitlements must be in: %v", err)
@@ -132,14 +134,14 @@ func main() {
 		defer grants.Close()
 
 		if err = (&pamrolebinding.Reconciler{
-			Client:          mgr.GetClient(),
-			Log:             ctrl.Log.WithName("controllers").WithName("PAMRoleBinding"),
-			Scheme:          mgr.GetScheme(),
-			Recorder:        mgr.GetEventRecorderFor("rbac-manager"),
-			Grants:          grants,
-			RefreshInterval: *pamRefresh,
-			Projects:        projects,
-		}).SetupWithManager(mgr); err != nil {
+			Client:              mgr.GetClient(),
+			Log:                 ctrl.Log.WithName("controllers").WithName("PAMRoleBinding"),
+			Scheme:              mgr.GetScheme(),
+			Recorder:            mgr.GetEventRecorderFor("rbac-manager"),
+			Grants:              grants,
+			RefreshInterval:     *pamRefresh,
+			EntitlementProjects: projects,
+		}).SetupWithManager(ctx, mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "PAMRoleBinding")
 			os.Exit(1)
 		}

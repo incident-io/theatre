@@ -7,28 +7,30 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("roleBindingName", func() {
+var _ = Describe("RoleBindingName", func() {
+	const grant = "projects/p/locations/global/entitlements/e/grants/g1"
+
 	It("names bindings after the binding and the local part of the user's email", func() {
-		Expect(RoleBindingName("operator", "jane.doe@example.com")).To(MatchRegexp(`^pam-operator-jane-doe-[0-9a-f]{8}$`))
-		Expect(RoleBindingName("operator", "x_y+z@example.com")).To(MatchRegexp(`^pam-operator-x-y-z-[0-9a-f]{8}$`))
+		Expect(RoleBindingName("operator", "jane.doe@example.com", grant)).To(MatchRegexp(`^pam-operator-jane-doe-[0-9a-f]{8}$`))
+		Expect(RoleBindingName("operator", "x_y+z@example.com", grant)).To(MatchRegexp(`^pam-operator-x-y-z-[0-9a-f]{8}$`))
 	})
 
-	It("is stable for a given binding and user", func() {
-		Expect(RoleBindingName("operator", "jane@example.com")).To(Equal(RoleBindingName("operator", "jane@example.com")))
+	It("is stable for a given binding and grant", func() {
+		Expect(RoleBindingName("operator", "jane@example.com", grant)).To(Equal(RoleBindingName("operator", "jane@example.com", grant)))
 	})
 
-	It("tells apart users whose local parts are the same", func() {
-		Expect(RoleBindingName("operator", "jane@example.com")).NotTo(Equal(RoleBindingName("operator", "jane@example.org")))
+	It("gives each grant its own name", func() {
+		Expect(RoleBindingName("operator", "jane@example.com", grant)).NotTo(Equal(RoleBindingName("operator", "jane@example.com", grant+"x")))
 	})
 
-	It("tells apart bindings and users whose names run together", func() {
-		Expect(RoleBindingName("op", "x-jane@example.com")).NotTo(Equal(RoleBindingName("op-x", "jane@example.com")))
+	It("tells apart bindings whose names run together", func() {
+		Expect(RoleBindingName("op", "x-jane@example.com", grant)).NotTo(Equal(RoleBindingName("op-x", "jane@example.com", grant)))
 	})
 
 	It("keeps names within the Kubernetes limit, and distinct when truncated", func() {
 		long := strings.Repeat("a", 245)
-		alice, alfred := RoleBindingName(long, "alice@example.com"), RoleBindingName(long, "alfred@example.com")
-		Expect(len(alice)).To(BeNumerically("<=", 253))
-		Expect(alice).NotTo(Equal(alfred))
+		first, second := RoleBindingName(long, "alice@example.com", grant), RoleBindingName(long, "alice@example.com", grant+"x")
+		Expect(len(first)).To(BeNumerically("<=", 253))
+		Expect(first).NotTo(Equal(second))
 	})
 })
