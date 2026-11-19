@@ -158,10 +158,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Before asking PAM anything, so expiry never depends on PAM answering.
 	errs := r.removeExpired(ctx, prb, owned, r.Now())
 
-	if !r.entitlementAllowed(prb.Spec.Entitlement) {
+	if err := r.checkEntitlementAllowed(prb.Spec.Entitlement); err != nil {
 		errs = append(errs, r.removeAll(ctx, prb, owned)...)
-		err := fmt.Errorf("entitlement %s isn't in rbac-manager's own project (%s)",
-			prb.Spec.Entitlement, strings.Join(r.EntitlementProjects, " / "))
 		return r.syncFailed(ctx, logger, prb, owned, r.Now(), rbacv1alpha1.PAMRoleBindingReasonEntitlementNotAllowed, errors.Join(append([]error{err}, errs...)...))
 	}
 
@@ -349,13 +347,14 @@ func (r *Reconciler) finalize(ctx context.Context, prb *rbacv1alpha1.PAMRoleBind
 	return r.Update(ctx, prb)
 }
 
-func (r *Reconciler) entitlementAllowed(entitlement string) bool {
+func (r *Reconciler) checkEntitlementAllowed(entitlement string) error {
 	for _, project := range r.EntitlementProjects {
 		if project != "" && strings.HasPrefix(entitlement, "projects/"+project+"/") {
-			return true
+			return nil
 		}
 	}
-	return false
+	return fmt.Errorf("entitlement %s isn't in rbac-manager's own project (%s)",
+		entitlement, strings.Join(r.EntitlementProjects, " / "))
 }
 
 // backoff never waits past the next binding's expiry.
