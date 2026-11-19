@@ -178,7 +178,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	desired := r.desiredBindings(logger, prb, grants, now)
-	errs = append(errs, r.applyBindings(ctx, prb, owned, desired)...)
+	errs = append(errs, r.applyBindings(ctx, prb, owned, desired, now)...)
 
 	return r.synced(ctx, logger, prb, owned, now, errs), nil
 }
@@ -226,16 +226,21 @@ func (r *Reconciler) removeAll(ctx context.Context, prb *rbacv1alpha1.PAMRoleBin
 }
 
 // applyBindings makes owned match desired, updating owned as it goes.
-func (r *Reconciler) applyBindings(ctx context.Context, prb *rbacv1alpha1.PAMRoleBinding, owned, desired roleBindings) []error {
+func (r *Reconciler) applyBindings(ctx context.Context, prb *rbacv1alpha1.PAMRoleBinding, owned, desired roleBindings, now time.Time) []error {
 	var errs []error
 	for key, rb := range owned {
 		want, ok := desired[key]
 		if ok && matches(rb, want) {
 			continue
 		}
-		reason := EventGrantWithdrawn
-		if ok {
+		var reason string
+		switch {
+		case ok:
 			reason = "" // edited since it was made, recreated below
+		case expired(rb, now):
+			reason = EventGrantExpired // ended while PAM was answering
+		default:
+			reason = EventGrantWithdrawn
 		}
 		if err := r.deleteRoleBinding(ctx, prb, rb, reason); err != nil {
 			errs = append(errs, err)
@@ -328,7 +333,8 @@ func (r *Reconciler) finalize(ctx context.Context, prb *rbacv1alpha1.PAMRoleBind
 		return fmt.Errorf("listing RoleBindings: %w", err)
 	}
 	for i := range labelled.Items {
-		if rb := &labelled.Items[i]; metav1.GetControllerOf(rb) == nil {
+		// Also take ones we control: the cache may not have seen a binding just created.
+		if rb := &labelled.Items[i]; metav1.GetControllerOf(rb) == nil || metav1.IsControlledBy(rb, prb) {
 			owned[client.ObjectKeyFromObject(rb)] = rb
 		}
 	}

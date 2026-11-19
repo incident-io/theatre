@@ -26,6 +26,18 @@ var _ = Describe("PAMRoleBinding", func() {
 		prb         *rbacv1alpha1.PAMRoleBinding
 	)
 
+	eventReasons := func() []string {
+		events := &corev1.EventList{}
+		Expect(k8sClient.List(ctx, events, client.InNamespace(prb.Namespace))).To(Succeed())
+		reasons := []string{}
+		for _, e := range events.Items {
+			if e.InvolvedObject.Kind == "PAMRoleBinding" && e.InvolvedObject.UID == prb.UID {
+				reasons = append(reasons, e.Reason)
+			}
+		}
+		return reasons
+	}
+
 	roleBindings := func() []rbacv1.RoleBinding {
 		list := &rbacv1.RoleBindingList{}
 		Expect(k8sClient.List(ctx, list, client.InNamespace(namespace))).To(Succeed())
@@ -211,6 +223,19 @@ var _ = Describe("PAMRoleBinding", func() {
 		Consistently(roleBindings, time.Second).Should(BeEmpty())
 	})
 
+	It("records a grant that ends while PAM is answering as expired", func() {
+		grants.SetGrants(entitlement, grant("heidi@example.com", "", 30*time.Minute))
+		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
+		Eventually(roleBindings).Should(HaveLen(1))
+
+		grants.SetDuringList(func() { clock.Advance(31 * time.Minute) })
+		DeferCleanup(func() { grants.SetDuringList(nil) })
+
+		Eventually(roleBindings).Should(BeEmpty())
+		Eventually(eventReasons).Should(ContainElement(pamrolebinding.EventGrantExpired))
+		Expect(eventReasons()).NotTo(ContainElement(pamrolebinding.EventGrantWithdrawn))
+	})
+
 	It("doesn't bind requesters that aren't people", func() {
 		grants.SetGrants(entitlement,
 			grant("bot@my-project.iam.gserviceaccount.com", "", time.Hour),
@@ -220,17 +245,7 @@ var _ = Describe("PAMRoleBinding", func() {
 		Expect(k8sClient.Create(ctx, prb)).To(Succeed())
 
 		Eventually(roleBindings).Should(ConsistOf(HaveField("Subjects", ConsistOf(HaveField("Name", "grace@example.com")))))
-		Eventually(func() []string {
-			events := &corev1.EventList{}
-			Expect(k8sClient.List(ctx, events)).To(Succeed())
-			reasons := []string{}
-			for _, e := range events.Items {
-				if e.InvolvedObject.Kind == "PAMRoleBinding" && e.InvolvedObject.Name == prb.Name {
-					reasons = append(reasons, e.Reason)
-				}
-			}
-			return reasons
-		}).Should(ContainElement(pamrolebinding.EventGrantSkipped))
+		Eventually(eventReasons).Should(ContainElement(pamrolebinding.EventGrantSkipped))
 	})
 
 	It("binds users for a PAMRoleBinding whose name is too long for a label", func() {
